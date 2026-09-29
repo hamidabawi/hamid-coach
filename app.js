@@ -3,7 +3,7 @@
    a copy, works offline, and computes the same dashboard locally between syncs. Demo mode needs no sheet at all. */
 (() => {
 'use strict';
-const APP_VERSION = '3.1.0';
+const APP_VERSION = '3.2.0';
 const APP_URL = new URL('./', location.href).href;
 
 /* ---------- Excel serial dates (1899-12-30 epoch), local-calendar based ---------- */
@@ -47,7 +47,10 @@ const saveSettings = () => store.set('settings', settings);
 const state = { screen: store.get('screen', 'today'), data: store.get('cache', null), queue: store.get('queue', []), rejected: null, foodDraft: { item: '', kcal: '', prot: '', note: '' }, busy: false, apiDown: null, mode: '', logDate: null, trainDate: null, foodDate: null, meal: null, error: null };
 const deviceId = store.get('device', null) || (() => { const id = (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2)).slice(0, 8); store.set('device', id); return id; })();
 const uuid = () => crypto.randomUUID ? crypto.randomUUID() : (Date.now().toString(36) + Math.random().toString(36).slice(2, 10));
-const todaySerial = () => settings.demo ? serialOf(2026, 10, 11) : serialFromDate(new Date());
+const DAY_START_HOUR = 4;   // a dose or a snack logged at 00:30 belongs to the evening before
+const todaySerial = () => settings.demo ? serialOf(2026, 10, 11) : serialFromDate(new Date(Date.now() - DAY_START_HOUR * 3600e3));
+const lateNight = () => !settings.demo && new Date().getHours() < DAY_START_HOUR;
+const isY = v => v === true || /^\s*(y|yes|true|1)\s*$/i.test(String(v == null ? '' : v));
 const num = v => { if (v === '' || v == null) return null; const n = +String(v).replace(',', '.'); return isNaN(n) ? null : n; };
 const isBlank = v => v === '' || v == null;
 const asText = s => /^[=+\-@]/.test(s) ? ' ' + s : s;   // a leading = + - @ would be read as a formula by a spreadsheet
@@ -63,23 +66,23 @@ function computeDashboard(d, today) {
   const avg = a => a.length ? a.reduce((x, y) => x + y, 0) / a.length : null;
   const byDate = {}; d.daily.forEach((r, i) => byDate[r[D.date]] = i);
   const foodByDate = {}; d.food.forEach(f => { (foodByDate[f[F.date]] = foodByDate[f[F.date]] || []).push(f); });
-  d.daily.forEach(r => { const k = foodByDate[r[D.date]] || []; r[D.foodK] = k.reduce((a, f) => a + (num(f[F.kcal]) || 0), 0); r[D.foodP] = k.reduce((a, f) => a + (num(f[F.prot]) || 0), 0); r[D.kcal] = num(r[D.kcalM]) ?? (r[D.foodK] > 0 ? r[D.foodK] : ''); r[D.prot] = num(r[D.protM]) ?? (r[D.foodP] > 0 ? r[D.foodP] : ''); r[D.supps] = SUPPS.filter(s => r[D[s.k]] === 'Y').length; r[D.logged] = (r[D.weight] !== '' || r[D.kcal] !== '' || r[D.supps] > 0 || r[D.spine] === 'Y' || !isBlank(r[D.retaU]) || !isBlank(r[D.tesaU])) ? 1 : 0; });
+  d.daily.forEach(r => { const k = foodByDate[r[D.date]] || []; r[D.foodK] = k.reduce((a, f) => a + (num(f[F.kcal]) || 0), 0); r[D.foodP] = k.reduce((a, f) => a + (num(f[F.prot]) || 0), 0); r[D.kcal] = num(r[D.kcalM]) ?? (r[D.foodK] > 0 ? r[D.foodK] : ''); r[D.prot] = num(r[D.protM]) ?? (r[D.foodP] > 0 ? r[D.foodP] : ''); r[D.supps] = SUPPS.filter(s => isY(r[D[s.k]])).length; r[D.logged] = (r[D.weight] !== '' || r[D.kcal] !== '' || r[D.supps] > 0 || isY(r[D.spine]) || !isBlank(r[D.retaU]) || !isBlank(r[D.tesaU])) ? 1 : 0; });
   d.workout.forEach(r => { r[W.e1rm] = num(r[W.load]) != null && num(r[W.repsTop]) != null ? r[W.load] * (1 + r[W.repsTop] / 30) : ''; r[W.done] = (!isBlank(r[W.load]) || !isBlank(r[W.setsDone])) ? 1 : 0; });
   const doneDates = new Set(d.workout.filter(r => r[W.done] === 1).map(r => r[W.date])); d.daily.forEach(r => r[D.sessLogged] = doneDates.has(r[D.date]) ? 1 : 0);
   d.bench.forEach(b => { const s = num(b[2]); b[16] = s && num(b[5]) != null ? b[5] / s : ''; b[17] = s && num(b[3]) != null ? b[3] / s : ''; b[18] = s && num(b[4]) != null ? b[4] / s : ''; b[19] = num(b[3]) != null && num(b[4]) ? b[3] / b[4] : ''; });
   const fcTable = d.forecast || null;
   const fc = w => { if (fcTable && fcTable[w - 1]) return fcTable[w - 1][2]; const pts = [[0, 101], [3, 98.5], [12, 93.5], [26, 89], [33, 88.5]]; for (let i = 0; i < pts.length - 1; i++) { const [w1, v1] = pts[i], [w2, v2] = pts[i + 1]; if (w >= w1 && w <= w2) return v1 + (v2 - v1) * (w - w1) / (w2 - w1); } return 88.5; };
   const base = avg(d.daily.slice(0, 4).map(r => num(r[D.rhr])).filter(x => x != null));
-  const weekly = []; let prev = d.startWeight || 101;
+  const weekly = [], rawAvg = []; let prev = d.startWeight || 101; const tesaOn = s => { const st = d.settings || {}; return num(st.tesaStart) != null && s >= st.tesaStart && (num(st.tesaStop) == null || s <= st.tesaStop); };
   for (let w = 1; w <= 33; w++) {
     const rows = d.daily.filter(r => weekOf(r[D.date]) === w), ws = rows.map(r => num(r[D.weight])).filter(x => x != null), aw = avg(ws);
     const kc = rows.map(r => num(r[D.kcal])).filter(x => x), pr = rows.map(r => num(r[D.prot])).filter(x => x), hr = rows.map(r => num(r[D.rhr])).filter(x => x);
     const ph = (fcTable && fcTable[w - 1] && fcTable[w - 1][1]) || ([9, 18, 26].includes(w) ? 'Deload' : w === 25 ? 'Retest' : w >= 27 ? 'Taper / maintenance' : 'Month ' + (w <= 5 ? 1 : w <= 9 ? 2 : w <= 14 ? 3 : w <= 18 ? 4 : w <= 22 ? 5 : 6));
-    const elapsed = Math.max(0, Math.min(7, today - (START + 7 * (w - 1)))), ycount = rows.filter(r => r[D.date] < today).reduce((a, r) => a + SUPPS.filter(s => r[D[s.k]] === 'Y').length, 0);   // closed days only
+    const elapsed = Math.max(0, Math.min(7, today - (START + 7 * (w - 1)))), ycount = rows.filter(r => r[D.date] < today).reduce((a, r) => a + SUPPS.filter(s => isY(r[D[s.k]])).length, 0);   // closed days only
     const floor = aw != null && aw < 92 ? 1900 : 2000, band = w <= 12 ? 1.5 : 2;
     const lo = fcTable && fcTable[w - 1] ? fcTable[w - 1][3] : r1(fc(w) - band), hi = fcTable && fcTable[w - 1] ? fcTable[w - 1][4] : r1(fc(w) + band);
-    weekly.push([w, START + 7 * (w - 1), START + 7 * (w - 1) + 6, ph, aw == null ? '' : r1(aw), aw == null ? '' : r1(aw - prev), rows.filter(r => num(r[D.waist]) != null).map(r => r[D.waist]).pop() ?? '', hr.length ? r1(avg(hr)) : '', hr.length && base != null ? r1(avg(hr) - base) : '', kc.length ? Math.round(avg(kc)) : '', rows.length ? Math.round(avg(rows.map(r => num(r[D.kcalT]) || 0))) : '', kc.filter(x => x < floor).length, pr.length ? Math.round(avg(pr)) : '', pr.filter(x => x < 180).length, elapsed ? ycount / (elapsed * SUPPS.length) : '', rows.filter(r => r[D.spine] === 'Y').length, rows.filter(r => r[D.sauna] === 'Y').length, rows.filter(r => r[D.sessLogged]).length, rows.filter(r => r[D.session] !== 'Rest').length, d.workout.filter(r => r[W.week] === w && r[W.done]).length, d.workout.filter(r => r[W.week] === w).length, rows.reduce((a, r) => a + (num(r[D.retaU]) || 0), 0), rows.filter(r => num(r[D.tesaU]) != null).length, rows.filter(r => num(r[D.tesaPlan]) != null).length, r1(fc(w)), lo, hi, (d.weeklyNotes && d.weeklyNotes[String(w)]) || '']);
-    if (aw != null) prev = aw;
+    weekly.push([w, START + 7 * (w - 1), START + 7 * (w - 1) + 6, ph, aw == null ? '' : r1(aw), aw == null ? '' : r1(aw - prev), rows.filter(r => num(r[D.waist]) != null).map(r => r[D.waist]).pop() ?? '', hr.length ? r1(avg(hr)) : '', hr.length && base != null ? r1(avg(hr) - base) : '', kc.length ? Math.round(avg(kc)) : '', (tt => tt.length ? Math.round(avg(tt)) : '')(rows.map(r => num(r[D.kcalT])).filter(x => x != null)), kc.filter(x => x < floor).length, pr.length ? Math.round(avg(pr)) : '', pr.filter(x => x < 180).length, elapsed ? ycount / (elapsed * SUPPS.length) : '', rows.filter(r => isY(r[D.spine])).length, rows.filter(r => isY(r[D.sauna])).length, rows.filter(r => r[D.sessLogged]).length, rows.filter(r => r[D.session] !== 'Rest').length, d.workout.filter(r => r[W.week] === w && r[W.done]).length, d.workout.filter(r => r[W.week] === w).length, rows.reduce((a, r) => a + (num(r[D.retaU]) || 0), 0), rows.filter(r => num(r[D.tesaU]) != null).length, rows.filter(r => num(r[D.tesaPlan]) != null && tesaOn(r[D.date])).length, r1(fc(w)), lo, hi, (d.weeklyNotes && d.weeklyNotes[String(w)]) || '']);
+    rawAvg.push(aw); prev = aw;
   }
   const last = n => d.daily.filter(r => r[D.date] > today - n && r[D.date] <= today);          // morning measures: includes today
   const closed = n => d.daily.filter(r => r[D.date] > today - n - 1 && r[D.date] <= today - 1);  // intake, supplements, routine: closed days, yesterday back
@@ -87,8 +90,8 @@ function computeDashboard(d, today) {
   const wk = weekOf(today), chg = w7 != null && w7p != null ? w7 - w7p : null, calib = !(wk <= 3 || [9, 18, 26].includes(wk)), ceil = wk <= 12 ? 1 : 0.75;
   const rhr7 = avg(last(7).map(r => num(r[D.rhr])).filter(x => x != null)), rhrmax = Math.max(0, ...last(7).map(r => num(r[D.rhr]) || 0)), rhr10 = base != null ? last(7).filter(r => num(r[D.rhr]) != null && r[D.rhr] >= base + 10).length : 0;
   const c7 = closed(7), kcLogged = c7.filter(r => num(r[D.kcal]));
-  const kc7 = avg(kcLogged.map(r => num(r[D.kcal]))), kT7 = avg(kcLogged.map(r => num(r[D.kcalT]) || 0)), kdays = kcLogged.length;
-  const minWeekly = Math.min(...weekly.map(r => num(r[4])).filter(x => x != null && x > 0)), floor = isFinite(minWeekly) && minWeekly < 92 ? 1900 : 2000;   // latches once under 92 kg
+  const kc7 = avg(kcLogged.map(r => num(r[D.kcal]))), kT7 = avg(kcLogged.map(r => num(r[D.kcalT])).filter(x => x != null)), kdays = kcLogged.length;
+  const minWeekly = Math.min(...rawAvg.filter(x => x != null && x > 0)), floor = isFinite(minWeekly) && minWeekly < 92 ? 1900 : 2000;   // latches once under 92 kg
   const floordays = kcLogged.filter(r => r[D.kcal] < floor).length, pr7 = avg(c7.map(r => num(r[D.prot])).filter(x => x)), protdays = c7.filter(r => num(r[D.prot]) && r[D.prot] < 180).length;
   const map = {}; const S = (k, v) => map[k] = v == null ? '' : v;
   S('Today', today); S('Tracker week', wk); S('Phase', weekly[wk - 1][3]); S('Days logged so far', d.daily.filter(r => r[D.date] <= today && r[D.logged]).length); S('Days elapsed', today - START + 1);
@@ -96,27 +99,29 @@ function computeDashboard(d, today) {
   S('Forecast this week (kg)', weekly[wk - 1][24]); S('Forecast band', (+weekly[wk - 1][25]).toFixed(1) + ' - ' + (+weekly[wk - 1][26]).toFixed(1)); S('Rate ceiling this week (kg/week)', ceil); S('Calibration week?', calib ? 'Yes' : 'No (excluded week)');
   S('RATE STATUS', chg == null ? 'WATCH: need 14 days of weights' : !calib ? 'OK: excluded week, no change' : -chg > 1.5 ? 'ACTION: lost more than 1.5 kg this week - tell the doctor, no escalation' : -chg > ceil ? 'ACTION: above the ceiling - add 150-200 kcal of carbs around training' : -chg < 0.4 ? 'WATCH: under 0.4 kg/week - if 3 weeks running with intake logged, cut 150 kcal from training-day carbs (2,200 to 2,050; rest days sit on the floor)' : 'OK: inside the expected 0.5-0.8 kg/week');
   const waist = d.daily.filter(r => num(r[D.waist]) != null).pop(); S('Waist (latest, cm)', waist ? waist[D.waist] : ''); S('Waist-to-height', waist ? waist[D.waist] / (d.heightCm || 190) : ''); S('WAIST STATUS', !waist ? 'WATCH: no tape yet' : waist[D.waist] < 95 ? 'OK: under 0.5 (waist under 95 cm)' : 'WATCH: ' + r1(waist[D.waist] - 95).toFixed(1) + ' cm above the 95 cm target');
-  S('Baseline (mean Sep 28 - Oct 1)', base == null ? '' : r1(base)); S('7-day mean', rhr7 == null ? '' : r1(rhr7)); S('7-day mean vs baseline (bpm)', rhr7 != null && base != null ? r1(rhr7 - base) : ''); S('Highest reading, last 7 days', rhrmax || ''); S('Days at +10 or more, last 7', rhr10);
+  const baseN = d.daily.slice(0, 4).filter(r => num(r[D.rhr]) != null).length; S('Baseline (mean Sep 28 - Oct 1)', base == null ? '' : r1(base)); S('Baseline days logged (of 4)', baseN); S('7-day mean', rhr7 == null ? '' : r1(rhr7)); S('7-day mean vs baseline (bpm)', rhr7 != null && base != null ? r1(rhr7 - base) : ''); S('Highest reading, last 7 days', rhrmax || ''); S('Days at +10 or more, last 7', rhr10);
   const diff = rhr7 != null && base != null ? Math.round(rhr7 - base) : null;
-  S('HR STATUS', diff == null ? 'WATCH: log resting HR every morning' : (rhrmax >= 100 || rhr10 >= 3) ? 'ACTION: cut sets by a third, no sauna or HIIT, call the doctor before the next dose, ECG this week, no escalation' : diff >= 10 ? 'ACTION: +10 sustained - apply the rule' : diff >= 6 ? 'WATCH: +6 to +9 bpm - drop the technique sets this week and mention it at the next check-in' : 'OK: within 5 bpm of baseline');
+  const HR_ACTION = 'ACTION: cut sets by a third, no sauna or HIIT, call the doctor before the next dose, ECG this week, no escalation';
+  S('HR STATUS', rhrmax >= 100 ? HR_ACTION : diff == null ? (baseN === 0 ? (today <= START + 3 ? 'ACTION: no RHR baseline yet - log resting HR every morning before the Oct 1 dose' : 'WATCH: no pre-dose RHR baseline - only the 100 bpm rule is active; tell the doctor') : 'WATCH: log resting HR every morning') : rhr10 >= 3 ? HR_ACTION : diff >= 10 ? 'ACTION: +10 sustained - apply the rule' : diff >= 6 ? 'WATCH: +6 to +9 bpm - drop the technique sets this week and mention it at the next check-in' : 'OK: within 5 bpm of baseline');
   S('7-day average calories', kc7 == null ? '' : Math.round(kc7)); S('7-day average target', kT7 == null ? '' : Math.round(kT7)); S('Days with calories logged, last 7', kdays); S('Calorie floor now', floor); S('Days under the floor, last 7', floordays);
-  S('CALORIE STATUS', kdays === 0 ? 'WATCH: no food logged in the last 7 days' : (kc7 < 1800 && kdays >= 7) ? 'ACTION: 7-day average under 1,800 - dose conversation with the written 3 mg fallback' : floordays >= 3 ? 'ACTION: under the floor on 3+ days - fixed liquid meal every day next week and tell the doctor before the next injection' : kc7 > kT7 + 200 ? 'WATCH: averaging ' + Math.round(kc7 - kT7) + ' kcal over target' : 'OK: ' + Math.round(kc7) + ' kcal vs ' + Math.round(kT7) + ' target');
+  S('CALORIE STATUS', kdays === 0 ? 'WATCH: no food logged in the last 7 days' : (kc7 < 1800 && kdays >= 7) ? 'ACTION: 7-day average under 1,800 - dose conversation with the written 3 mg fallback' : floordays >= 3 ? 'ACTION: under the floor on 3+ days - fixed liquid meal every day next week and tell the doctor before the next injection' : (kT7 != null && kc7 > kT7 + 200) ? 'WATCH: averaging ' + Math.round(kc7 - kT7) + ' kcal over target' : 'OK: ' + Math.round(kc7) + ' kcal vs ' + (kT7 == null ? '' : Math.round(kT7)) + ' target');
   S('7-day average protein (g)', pr7 == null ? '' : Math.round(pr7)); S('Days under 180 g, last 7', protdays); S('PROTEIN STATUS', pr7 == null ? 'WATCH: no protein logged' : protdays >= 2 ? 'ACTION: under 180 g on ' + protdays + ' of the last 7 days - shakes are not optional' : pr7 < 180 ? 'WATCH: averaging under 180 g' : 'OK: ' + Math.round(pr7) + ' g average');
-  const elapsedAll = Math.max(1, today - START), supp = {}, nextLab = LABS().find(l => l[0] >= today), c28 = closed(28);
-  SUPPS.forEach(s => { const c = D[s.k], y7 = c7.filter(r => r[c] === 'Y').length, p7 = y7 / Math.min(7, elapsedAll), p28 = c28.filter(r => r[c] === 'Y').length / Math.min(28, elapsedAll); supp[s.sheet] = { d7: p7, d28: p28, tracked: 'Y', status: s.k === 'biotin' ? (y7 > 0 ? 'WATCH: the plan says stop biotin; none within 72 h of a blood draw (next: ' + (nextLab ? fmtDate(nextLab[0], { day: 'numeric', month: 'short' }) : '-') + ')' : 'OK: not taken') : s.k === 'collagen' ? (y7 >= 2 ? 'OK' : 'WATCH: aim for Tue, Thu and Fri') : p7 >= 6 / 7 ? 'OK' : p7 >= 4 / 7 ? 'WATCH: ' + Math.round(p7 * 100) + '% this week' : 'ACTION: ' + Math.round(p7 * 100) + '% this week' }; });
-  const rp = d.daily.filter(r => num(r[D.retaPlan]) && r[D.date] <= today), rt = rp.filter(r => num(r[D.retaU])); S('Retatrutide doses planned to date', rp.length); S('Retatrutide doses logged', rt.length); const ld = d.daily.filter(r => num(r[D.retaU])).pop(); S('Last dose (date)', ld ? ld[D.date] : ''); S('Last dose (units)', ld ? ld[D.retaU] : '');
-  const nx = d.daily.find(r => num(r[D.retaPlan]) && r[D.date] >= today); S('Next planned dose', nx ? fmtDate(nx[D.date]) + '  (' + nx[D.retaPlan] + ' mg = ' + nx[D.retaPlan] * 10 + ' units)' : 'taper: doctor sets'); S('RETA STATUS', rp.length === 0 ? 'OK: first dose Thu Oct 1' : rp.length - rt.length > 0 ? 'ACTION: ' + (rp.length - rt.length) + ' planned dose(s) not logged - log it or apply the missed-dose rule' : 'OK: every planned dose logged');
-  const tp = d.daily.filter(r => num(r[D.tesaPlan]) && r[D.date] <= today), tt = tp.filter(r => num(r[D.tesaU])); S('Tesamorelin nights planned to date', tp.length); S('Tesamorelin nights logged', tt.length); S('Nights logged, last 7', c7.filter(r => num(r[D.tesaU])).length);
-  const tr = d.daily[byDate[today]]; S("Tonight's tesamorelin", tr && num(tr[D.tesaPlan]) ? tr[D.tesaPlan] + ' mg = ' + tr[D.tesaPlan] * 5 + ' units (conditional on the gates)' : 'none planned'); S('TESA STATUS', tp.length === 0 ? 'OK: not started (conditional start Nov 19)' : tp.length - tt.length >= 3 ? 'ACTION: ' + (tp.length - tt.length) + ' planned nights not logged' : tp.length - tt.length > 0 ? 'WATCH: ' + (tp.length - tt.length) + ' night(s) missed - skip, never double' : 'OK: every planned night logged');
+  const nClosed = Math.max(0, Math.min(7, today - START)), n28 = Math.max(0, Math.min(28, today - START)), supp = {}, nextLab = LABS().find(l => l[0] >= today), c28 = closed(28);
+  SUPPS.forEach(s => { const c = D[s.k], y7 = c7.filter(r => isY(r[c])).length, p7 = nClosed > 0 ? y7 / nClosed : '', p28 = n28 > 0 ? c28.filter(r => isY(r[c])).length / n28 : ''; supp[s.sheet] = { d7: p7, d28: p28, tracked: 'Y', status: s.k === 'biotin' ? (y7 > 0 ? 'WATCH: the plan says stop biotin; none within 72 h of a blood draw (next: ' + (nextLab ? fmtDate(nextLab[0], { day: 'numeric', month: 'short' }) : '-') + ')' : 'OK: not taken') : s.k === 'collagen' ? ((nClosed < 7 || y7 >= 2) ? 'OK' : 'WATCH: aim for Tue, Thu and Fri') : p7 === '' ? '' : p7 >= 6 / 7 ? 'OK' : p7 >= 4 / 7 ? 'WATCH: ' + Math.round(p7 * 100) + '% this week' : 'ACTION: ' + Math.round(p7 * 100) + '% this week' }; });
+  const rp = d.daily.filter(r => num(r[D.retaPlan]) && r[D.date] <= today), rt = rp.filter(r => num(r[D.retaU])), rmiss = rp.filter(r => r[D.date] < today && !num(r[D.retaU])).length; S('Retatrutide doses planned to date', rp.length); S('Retatrutide doses logged', rt.length); S('Retatrutide doses missed (closed days)', rmiss); const ld = d.daily.filter(r => num(r[D.retaU])).pop(); S('Last dose (date)', ld ? ld[D.date] : ''); S('Last dose (units)', ld ? ld[D.retaU] : '');
+  const nx = d.daily.find(r => num(r[D.retaPlan]) && r[D.date] >= today); S('Next planned dose', nx ? fmtDate(nx[D.date]) + '  (' + nx[D.retaPlan] + ' mg = ' + nx[D.retaPlan] * 10 + ' units)' : 'taper: doctor sets'); const tr0 = d.daily[byDate[today]], rToday = tr0 && num(tr0[D.retaPlan]) ? (num(tr0[D.retaU]) ? 'logged' : 'due') : 'none'; S("Today's retatrutide", rToday); S('RETA STATUS', rmiss > 0 ? 'ACTION: ' + rmiss + ' planned dose(s) not logged - log it or apply the missed-dose rule' : rToday === 'due' ? 'OK: dose due tonight (' + tr0[D.retaPlan] + ' mg = ' + tr0[D.retaPlan] * 10 + ' units)' : rp.length === 0 ? 'OK: first dose Thu Oct 1' : 'OK: every planned dose logged');
+  const tp = d.daily.filter(r => num(r[D.tesaPlan]) && r[D.date] <= today && tesaOn(r[D.date])), tt = tp.filter(r => num(r[D.tesaU])), tmiss = tp.filter(r => r[D.date] < today && !num(r[D.tesaU])).length; S('Tesamorelin nights planned to date', tp.length); S('Tesamorelin nights logged', tt.length); S('Tesamorelin nights missed (closed days)', tmiss); S('Nights logged, last 7', c7.filter(r => num(r[D.tesaU])).length);
+  const tr = d.daily[byDate[today]], tIn = tr && tesaOn(today) && num(tr[D.tesaPlan]); S("Tonight's tesamorelin", tIn ? tr[D.tesaPlan] + ' mg = ' + tr[D.tesaPlan] * 5 + ' units' : 'none planned'); const tToday = tIn ? (num(tr[D.tesaU]) ? 'logged' : 'due') : 'none'; S("Today's tesamorelin", tToday); const tst = (d.settings || {}).tesaStart;
+  S('TESA STATUS', num(tst) == null ? 'OK: not started (conditional on the Nov gates; set the start date under Settings when the doctor confirms)' : tp.length === 0 ? 'OK: starts ' + fmtDate(tst) : tmiss >= 3 ? 'ACTION: ' + tmiss + ' planned nights not logged' : tmiss > 0 ? 'WATCH: ' + tmiss + ' night(s) missed - skip, never double' : tToday === 'due' ? 'OK: dose due at bedtime' : 'OK: every planned night logged');
   const gl = d.daily.filter(r => num(r[D.glucose]) != null).pop(), g14 = d.daily.filter(r => r[D.date] > today - 14 && r[D.date] <= today && num(r[D.glucose]) != null); S('Last fasting glucose (mmol/L)', gl ? gl[D.glucose] : ''); const g61 = g14.filter(r => r[D.glucose] >= 6.1 && r[D.glucose] < 7).length, g7 = g14.filter(r => r[D.glucose] >= 7).length; S('Readings 6.1-6.9, last 14 days', g61); S('Readings 7.0 or more, last 14 days', g7);
   S('GLUCOSE STATUS', tp.length === 0 ? 'n/a until tesamorelin runs' : g7 > 0 ? 'ACTION: a reading of 7.0+ - lab venous glucose this week; only a lab value changes the dose' : g61 >= 2 ? 'WATCH: two readings 6.1-6.9 - lab venous glucose within the week' : !gl ? 'WATCH: log fasting glucose 3x per week' : 'OK');
-  const wkrow = weekly[wk - 1], remaining = d.daily.filter(r => r[D.date] > today && r[D.date] <= wkrow[2] && r[D.session] !== 'Rest').length;
+  const wkrow = weekly[wk - 1], remaining = d.daily.filter(r => r[D.date] >= today && r[D.date] <= wkrow[2] && r[D.session] !== 'Rest' && !(r[D.date] === today && r[D.sessLogged])).length;
   S('Sessions done this week', wkrow[17]); S('Sessions planned this week', wkrow[18]); S('Sessions done, cumulative', d.daily.filter(r => r[D.date] <= today && r[D.sessLogged]).length); S('Sessions planned to date', d.daily.filter(r => r[D.date] <= today && r[D.session] !== 'Rest').length);
   const wlog = d.workout.filter(r => r[W.date] <= today); S('Exercises logged / planned to date', wlog.filter(r => r[W.done]).length + ' / ' + wlog.length); S('Volume shortfall (planned rows not logged, last 7 days)', d.workout.filter(r => r[W.date] > today - 8 && r[W.date] <= today - 1 && !r[W.done]).length);
-  const sp7 = c7.filter(r => r[D.spine] === 'Y').length, sa7 = c7.filter(r => r[D.sauna] === 'Y').length; S('Spine routine days, last 7', sp7); S('Sauna days, last 7', sa7);
+  const sp7 = c7.filter(r => isY(r[D.spine])).length, sa7 = c7.filter(r => isY(r[D.sauna])).length; S('Spine routine days, last 7', sp7); S('Sauna days, last 7', sa7);
   S('TRAINING STATUS', wkrow[17] + remaining < wkrow[18] ? 'WATCH: ' + (wkrow[18] - wkrow[17] - remaining) + ' session(s) missed so far this week - never zero: B session rule' : 'OK: on track this week');
-  S('SPINE ROUTINE STATUS', sp7 >= 6 ? 'OK: ' + sp7 + '/7' : sp7 >= 4 ? 'WATCH: ' + sp7 + '/7 - it never skips' : 'ACTION: ' + sp7 + '/7 days - the single most important line in the plan');
-  S('SAUNA CHECK', sa7 > 4 ? 'WATCH: more than 4 sauna sessions in 7 days' : /^ACTION/.test(map['HR STATUS']) ? 'ACTION: no sauna this week (heart-rate rule)' : 'OK');
+  S('SPINE ROUTINE STATUS', nClosed <= 0 ? '' : sp7 / nClosed >= 6 / 7 ? 'OK: ' + sp7 + '/' + nClosed : sp7 / nClosed >= 4 / 7 ? 'WATCH: ' + sp7 + '/' + nClosed + ' - it never skips' : 'ACTION: ' + sp7 + '/' + nClosed + ' days - the single most important line in the plan');
+  S('SAUNA CHECK', sa7 > 4 ? 'WATCH: more than 4 sauna sessions in 7 days' : /^ACTION: (cut sets|\+10)/.test(map['HR STATUS']) ? 'ACTION: no sauna this week (heart-rate rule)' : 'OK');
   const strength = {}; let downs = 0;
   FAMILIES.forEach(f => { const rows = d.workout.filter(r => r[W.family] === f && num(r[W.e1rm]) != null); const l = rows[rows.length - 1]; const m1 = Math.max(0, ...rows.filter(r => r[W.week] <= 5).map(r => r[W.e1rm])); const l14 = Math.max(0, ...rows.filter(r => r[W.date] > today - 14 && r[W.date] <= today).map(r => r[W.e1rm])); const ch = m1 && l14 ? l14 / m1 - 1 : ''; if (ch !== '' && ch < -0.05) downs++; strength[f] = { top: l ? l[W.load] + ' kg x ' + l[W.repsTop] : '', e1rm: l ? Math.round(l[W.e1rm]) : '', m1: m1 ? Math.round(m1) : '', last14: l14 ? Math.round(l14) : '', change: ch }; });
   S('STRENGTH OVERRIDE', downs >= 2 ? 'ACTION: two families down 5%+ vs Month 1 - if it holds two weeks, add 150 kcal regardless of the scale' : downs === 1 ? 'WATCH: one family down 5%+' : 'OK');
@@ -160,7 +165,7 @@ class SheetsStore {
     const meta = j.meta || {};
     return { daily: (j.daily || []).map(r => pad(r, 38)), workout: (j.workout || []).map(r => pad(r, 17)), food: (j.food || []).map(r => pad(r, 7)), bench: (j.bench || []).map(r => pad(r, 21)), weekly: (j.weekly || []).map(r => pad(r, 28)),
       dashboard: parseDashboard(j.dashboard || []), labs: meta.labs, forecast: meta.forecast, weeklyNotes: meta.weeklyNotes, startWeight: meta.startWeight, heightCm: meta.heightCm,
-      routine: shapeRoutine(j.routine), routineSupported: Array.isArray(j.routine), sheetToday: j.today, sheetName: j.name, tz: j.tz, ts: Date.now(), source: 'sheets', dashboardSource: 'sheets' };
+      routine: shapeRoutine(j.routine), routineSupported: Array.isArray(j.routine), settings: Object.assign({ tesaStart: null, tesaStop: null }, j.settings || {}), sheetToday: j.today, serverToday: j.serverToday, sheetName: j.name, tz: j.tz, ts: Date.now(), source: 'sheets', dashboardSource: 'sheets' };
   }
 }
 function parseDashboard(rows) {
@@ -217,9 +222,10 @@ class Mock {
       });
     }
     const bench = [[serialOf(2026, 8, 29), 'Baseline', 96, 41, 44, 118, 74, 12, 11, 'Y', 'N', 2, 101, 'BW x 15', 24, '', '', '', '', '', 'record'], [serialOf(2026, 10, 21), '#2 (gate for Month 3 heavy 5s)', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 120], [serialOf(2027, 0, 23), '#3 (gate for 175 kg trap bar)', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 150], [serialOf(2027, 2, 20), '#4 (retest week)', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 150]];
-    const d = { daily, workout, food, bench, weekly: [], dashboard: null, routineRows: DEMO_ROUTINE.map(r => r.slice()), ts: Date.now(), source: 'demo', dashboardSource: 'phone' }; this.recompute(d); return d;
+    const d = { daily, workout, food, bench, weekly: [], dashboard: null, routineRows: DEMO_ROUTINE.map(r => r.slice()), settings: { tesaStart: serialOf(2026, 10, 19), tesaStop: null }, ts: Date.now(), source: 'demo', dashboardSource: 'phone' }; this.recompute(d); return d;
   }
   recompute(d) { const r = computeDashboard(d, serialOf(2026, 10, 11)); d.dashboard = r.dashboard; d.weekly = r.weekly; d.routineRows = d.routineRows || DEMO_ROUTINE.map(x => x.slice()); d.routine = shapeRoutine(d.routineRows); d.routineSupported = true; d.ts = Date.now(); store.set('mock', d); return d; }
+  async writeSetting(op) { this.data.settings = this.data.settings || {}; this.data.settings[op.key] = op.value == null || op.value === '' ? null : op.value; this.recompute(this.data); }
   async writeRoutine(op) { const rows = this.data.routineRows; if (op.action === 'delete') { const i = rows.findIndex(r => String(r[0]) === String(op.id)); if (i >= 0) rows.splice(i, 1); } else { const it = op.item, i = rows.findIndex(r => String(r[0]) === String(it.id)); const row = i >= 0 ? rows[i].slice() : [it.id, 'Item', 'Other', 0, 0, 'All', 'Y', rows.length + 1, '']; if ('name' in it) row[1] = it.name; if ('meal' in it) row[2] = it.meal; if ('kcal' in it) row[3] = it.kcal; if ('prot' in it) row[4] = it.prot; if ('days' in it) row[5] = it.days; if ('active' in it) row[6] = it.active === false ? 'N' : 'Y'; if ('order' in it) row[7] = it.order; if ('note' in it) row[8] = it.note || ''; if (i >= 0) rows[i] = row; else rows.push(row); } this.recompute(this.data); }
   async readAll() { this.recompute(this.data); return JSON.parse(JSON.stringify(this.data)); }
   async writeCells(sheet, cells) { const tbl = sheet === 'Daily Log' ? this.data.daily : this.data.workout; cells.forEach(c => { const m = c.addr.match(/^([A-Z]+)(\d+)$/); tbl[+m[2] - 2][colIdx(m[1])] = c.value == null ? '' : c.value; }); this.recompute(this.data); }
@@ -254,6 +260,7 @@ const statusCls = t => /^ACTION/.test(t) ? 'action' : /^WATCH/.test(t) ? 'watch'
 const statusText = t => String(t).replace(/^(OK|WATCH|ACTION):\s*/, '');
 const routineFor = s => { const row = dailyRow(s) || [], rest = row[D.session] === 'Rest'; return (state.data.routine || []).filter(it => it.active && (it.days === 'All' || (it.days === 'Rest') === rest)); };
 const routineTicked = (s, id) => state.data.food.find(r => r[F.id] === rtFoodId(s, id)) || null;
+const tesaActive = s => { const st = state.data && state.data.settings; return !!(st && num(st.tesaStart) != null && s >= st.tesaStart && (num(st.tesaStop) == null || s <= st.tesaStop)); };
 const foodFor = s => state.data.food.map((r, i) => ({ r, i })).filter(x => x.r[F.date] === s && !(+x.r[F.kcal] === 0 && /example row/i.test(x.r[F.item])));
 const workoutFor = s => state.data.workout.map((r, i) => ({ r, i })).filter(x => x.r[W.date] === s);
 function recomputeLocal() { if (!state.data) return; const r = computeDashboard(state.data, todaySerial()); state.data.dashboard = r.dashboard; if (state.data.source !== 'sheets' || state.apiDown) state.data.weekly = r.weekly; state.data.dashboardSource = 'phone'; }
@@ -262,7 +269,7 @@ function recomputeLocal() { if (!state.data) return; const r = computeDashboard(
 const sheetDateOff = d => d && d.source === 'sheets' && num(d.sheetToday) != null && d.sheetToday !== todaySerial();   // the sheet's TODAY() is not the phone's date: compute locally
 async function refresh(silent) {
   if (!backend) return; state.busy = true; syncUI();
-  try { const d = await backend.readAll(); state.data = d; state.queue.forEach(applyLocal); if (state.queue.length || sheetDateOff(d)) recomputeLocal(); store.set('cache', state.data); state.error = null; state.apiDown = null; if (!silent) toast(settings.demo ? 'Demo data loaded' : 'Synced with Google Sheets'); }
+  try { const ep = writeEpoch; const d = await backend.readAll(); if (ep !== writeEpoch) { state.busy = flushing; syncUI(); render(); return; } state.data = d; state.queue.forEach(applyLocal); if (state.queue.length || sheetDateOff(d)) recomputeLocal(); store.set('cache', state.data); state.error = null; state.apiDown = null; if (!silent) toast(settings.demo ? 'Demo data loaded' : 'Synced with Google Sheets'); }
   catch (e) { state.error = e.message; state.apiDown = e.message; if (state.data) recomputeLocal(); if (!silent) toast('Could not sync: ' + e.message, true); }
   state.busy = false; syncUI(); render();
 }
@@ -278,9 +285,10 @@ function applyLocal(op) {
   if (op.kind === 'food') { const i = state.data.food.findIndex(r => r[6] && r[6] === op.values[6]); if (i >= 0) state.data.food[i] = op.values.slice(); else state.data.food.push(op.values.slice()); }
   if (op.kind === 'delfood') { const i = state.data.food.findIndex(r => (op.id && r[6] === op.id) || (!op.id && r[F.date] === op.expect[F.date] && String(r[F.item]) === String(op.expect[F.item]))); if (i >= 0) state.data.food.splice(i, 1); }
   if (op.kind === 'bench') { const b = state.data.bench.find(x => x[0] === op.date); if (b) Object.entries(op.fields).forEach(([k, v]) => { const ci = BENCH_FIELDS.indexOf(k); if (ci >= 0) b[2 + ci] = v == null ? '' : v; }); }
+  if (op.kind === 'setting') { state.data.settings = state.data.settings || {}; state.data.settings[op.key] = op.value == null || op.value === '' ? null : op.value; }
   if (op.kind === 'routine') { const list = state.data.routine = state.data.routine || []; if (op.action === 'delete') { const i = list.findIndex(x => x.id === String(op.id)); if (i >= 0) list.splice(i, 1); } else if (op.item) { const i = list.findIndex(x => x.id === String(op.item.id)); const it = Object.assign(i >= 0 ? list[i] : { name: 'Item', meal: 'Other', kcal: 0, prot: 0, active: true, days: 'All', order: list.length + 1, note: '' }, op.item, { id: String(op.item.id) }); if (i >= 0) list[i] = it; else list.push(it); list.sort((a, b) => a.order - b.order); } }
 }
-let flushing = false;
+let flushing = false, writeEpoch = 0;
 async function flush() {
   if (flushing || !backend || !state.queue.length) return;
   if (!navigator.onLine && !settings.demo) { syncUI(); return; }
@@ -292,7 +300,7 @@ async function flush() {
         const res = await backend.writeOps(ops);
         state.queue = state.queue.slice(ops.length); store.set('queue', state.queue);
         (res.rejected || []).forEach(rj => { const op = ops[rj.index]; rejected.push('Not saved (' + (op ? op.kind : '?') + '): ' + rj.error); });
-        state.data = res.data; state.queue.forEach(applyLocal); if (state.queue.length || sheetDateOff(state.data)) recomputeLocal();
+        state.data = res.data; writeEpoch++; state.queue.forEach(applyLocal); if (state.queue.length || sheetDateOff(state.data)) recomputeLocal();
         if (rejected.some(m => /Routine sheet missing/.test(m))) state.data.routineSupported = false;
         store.set('cache', state.data); state.error = null; state.apiDown = null;
       }
@@ -306,6 +314,7 @@ async function flush() {
         else if (op.kind === 'delfood') await backend.deleteFoodRow(op.index, op.expect, op.id);
         else if (op.kind === 'bench') await backend.writeBench(op.date, op.fields);
         else if (op.kind === 'routine') await backend.writeRoutine(op);
+        else if (op.kind === 'setting') await backend.writeSetting(op);
         state.queue.shift(); store.set('queue', state.queue);
       }
       await refresh(true); toast('Saved');
@@ -319,7 +328,7 @@ function syncUI() {
   const t = state.data ? new Date(state.data.ts).toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit' }) : '';
   el.className = 'sync' + (state.busy ? ' busy' : (!backend || state.apiDown || !navigator.onLine || state.queue.length) ? ' off' : '');
   el.textContent = settings.demo ? 'Demo mode' : !backend ? 'Not connected' : state.busy ? 'Syncing…' : state.queue.length ? `${state.queue.length} pending` : state.apiDown ? 'Sheet unreachable' : t ? 'Synced ' + t : 'Not synced';
-  el.onclick = backend ? () => { flush(); refresh(); } : null;
+  el.onclick = backend ? () => { if (state.queue.length) flush(); else refresh(); } : null;
 }
 
 /* ---------- UI primitives ---------- */
@@ -359,15 +368,15 @@ function renderToday() {
   const t = todaySerial(), row = dailyRow(t) || [], d = dash(), items = foodFor(t), suppList = SUPPS.filter(s => !s.warn);
   const kcal = num(row[D.kcalM]) ?? items.reduce((a, x) => a + (num(x.r[F.kcal]) || 0), 0), kT = num(row[D.kcalT]) || 2200;
   const prot = num(row[D.protM]) ?? items.reduce((a, x) => a + (num(x.r[F.prot]) || 0), 0), pT = num(row[D.protT]) || 190;
-  const tracked = suppList.length, supps = suppList.filter(s => row[D[s.k]] === 'Y').length;
+  const tracked = suppList.length, supps = suppList.filter(s => isY(row[D[s.k]])).length;
   const wo = workoutFor(t), done = wo.filter(x => x.r[W.done] === 1 || !isBlank(x.r[W.load]) || !isBlank(x.r[W.setsDone])).length;
   const w7 = num(dv('7-day average (kg)')), wlatest = num(dv('Latest weight (kg)')), chg = num(dv('Change this week (kg)')), weightLogged = num(row[D.weight]);
-  const reta = num(row[D.retaPlan]), tesa = num(row[D.tesaPlan]), nextLab = LABS().find(l => l[0] >= t), actions = d.actions || [];
+  const reta = num(row[D.retaPlan]), tesa = tesaActive(t) ? num(row[D.tesaPlan]) : null, nextLab = LABS().find(l => l[0] >= t), actions = d.actions || [];
   return `<div class="hdr"><div><h1>${greet()}, ${esc(settings.name)}</h1><div class="sub">${fmtDate(t, { weekday: 'long', day: 'numeric', month: 'long' })}</div></div><button class="iconbtn" data-open="settings">⚙︎</button></div>
   <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px"><span class="chip violet">Week ${dv('Tracker week') || weekOf(t)}</span><span class="chip">${esc(dv('Phase') || '')}</span><span class="chip">${esc(row[D.session] || '')}${row[D.type] && row[D.type] !== 'Training' && row[D.type] !== 'Rest' ? ' · ' + esc(row[D.type]) : ''}</span></div>
   ${banner()}
   ${!row.length ? '<div class="status watch">Today is outside the plan window (Sep 28 2026 to May 16 2027).</div>' : ''}
-  ${sheetDateOff(state.data) && !state.apiDown ? `<div class="status watch">The Google Sheet thinks today is ${fmtDate(state.data.sheetToday)}, not ${fmtDate(t)}: its time zone is ${esc(state.data.tz || 'different')}. The dashboard below is computed on the phone for ${fmtDate(t)}; set the sheet's time zone under File, Settings.</div>` : ''}
+  ${lateNight() ? `<div class="status ok">After midnight: still logging for ${fmtDate(t)} until ${DAY_START_HOUR} am.</div>` : sheetDateOff(state.data) && !state.apiDown ? (num(state.data.serverToday) != null && state.data.serverToday !== t ? `<div class="status watch">The Google Sheet's clock says ${fmtDate(state.data.serverToday)}, not ${fmtDate(t)}: its time zone is ${esc(state.data.tz || 'different')}. The dashboard below is computed on the phone; set the sheet's time zone under File, Settings.</div>` : `<div class="status watch">The sheet's Today cell shows ${fmtDate(state.data.sheetToday)} (an as-of override in Lists!B13, or the sheet has not recalculated yet). The dashboard below is computed on the phone for ${fmtDate(t)}.</div>`) : ''}
   <div class="card hero">
     <div class="row"><div><h3 style="margin-bottom:6px">Weight</h3><div class="big">${w7 != null ? w7.toFixed(1) : (wlatest != null ? wlatest.toFixed(1) : '—')}<small>kg · 7-day avg</small></div>
       <div class="small muted" style="margin-top:6px">${chg != null ? `<span class="delta ${chg < 0 ? 'down' : 'up'}">${chg > 0 ? '+' : ''}${chg.toFixed(1)} kg this week</span> · ` : ''}forecast ${esc(dv('Forecast band') || '—')}${num(dv('Total lost since 101 kg')) != null ? ` · lost ${fmt(dv('Total lost since 101 kg'), 1)} kg` : ''}</div></div>
@@ -388,16 +397,16 @@ function renderToday() {
 function renderLog() {
   const s = state.logDate || todaySerial(), row = dailyRow(s);
   if (!row) return `<div class="hdr"><h1>Daily log</h1></div>${dateNav('log', s)}<div class="card">No plan row for this date.</div>`;
-  const f = (id, label, col, unit) => `<div class="field rel"><label>${label}</label><input class="inp num" id="${id}" data-col="${col}" type="text" inputmode="decimal" value="${isBlank(row[col]) ? '' : row[col]}"><span class="unit">${unit}</span></div>`;
+  const f = (id, label, col, unit) => `<div class="field rel"><label>${label}</label><input class="inp num" id="${id}" data-col="${col}" type="text" inputmode="decimal" value="${esc(isBlank(row[col]) ? '' : row[col])}" data-orig="${esc(isBlank(row[col]) ? '' : row[col])}"><span class="unit">${unit}</span></div>`;
   return `<div class="hdr"><div><h1>Daily log</h1><div class="sub">Weight, heart rate, supplements, notes</div></div></div>
   ${dateNav('log', s)}${banner()}
   <div class="card"><h3>Morning</h3><div class="inline">${f('l-weight', 'Weight', D.weight, 'kg')}${f('l-rhr', 'Resting HR', D.rhr, 'bpm')}</div><div class="inline">${f('l-waist', 'Waist', D.waist, 'cm')}${f('l-glucose', 'Fasting glucose', D.glucose, 'mmol/L')}</div><div class="inline">${f('l-sleep', 'Sleep', D.sleep, 'h')}${f('l-steps', 'Steps', D.steps, 'steps')}</div></div>
-  <div class="card"><h3>Supplements</h3><div class="toggles">${SUPPS.map(sp => `<button class="tg ${sp.warn ? 'warn' : ''} ${row[D[sp.k]] === 'Y' ? 'on' : ''}" data-tg="${sp.k}"><span class="dot">${row[D[sp.k]] === 'Y' ? '✓' : ''}</span>${sp.i} ${sp.n}</button>`).join('')}</div>
+  <div class="card"><h3>Supplements</h3><div class="toggles">${SUPPS.map(sp => `<button class="tg ${sp.warn ? 'warn' : ''} ${isY(row[D[sp.k]]) ? 'on' : ''}" data-tg="${sp.k}"><span class="dot">${isY(row[D[sp.k]]) ? '✓' : ''}</span>${sp.i} ${sp.n}</button>`).join('')}</div>
     <div class="xs dim" style="margin-top:8px">Biotin is on the plan's stop list: it corrupts the blood tests. Logging it keeps the lab-timing check honest.</div></div>
-  <div class="card"><h3>Routine</h3><div class="toggles"><button class="tg ${row[D.spine] === 'Y' ? 'on' : ''}" data-tg="spine"><span class="dot">${row[D.spine] === 'Y' ? '✓' : ''}</span>🧘 Spine routine</button><button class="tg ${row[D.sauna] === 'Y' ? 'on' : ''}" data-tg="sauna"><span class="dot">${row[D.sauna] === 'Y' ? '✓' : ''}</span>🔥 Sauna</button></div></div>
-  <div class="card"><h3>Peptides</h3><div class="kv"><div>Retatrutide</div><b>${num(row[D.retaPlan]) ? `${row[D.retaPlan]} mg planned · ${num(row[D.retaU]) ? row[D.retaU] + ' units logged' : 'not logged'}` : 'not today'}</b><div>Tesamorelin</div><b>${num(row[D.tesaPlan]) ? `${row[D.tesaPlan]} mg planned · ${num(row[D.tesaU]) ? row[D.tesaU] + ' units logged' : 'not logged'}` : 'not planned'}</b></div>
-    <div class="grid2" style="margin-top:10px">${num(row[D.retaPlan]) ? '<button class="btn sm" data-dose="reta" style="width:100%">Retatrutide dose</button>' : ''}${num(row[D.tesaPlan]) ? '<button class="btn sm" data-dose="tesa" style="width:100%">Tesamorelin dose</button>' : ''}</div></div>
-  <div class="card"><div class="field"><label>Notes, symptoms, energy</label><textarea class="inp" id="l-notes" rows="3" data-col="${D.notes}">${esc(String(row[D.notes] || '').trim())}</textarea></div></div>
+  <div class="card"><h3>Routine</h3><div class="toggles"><button class="tg ${isY(row[D.spine]) ? 'on' : ''}" data-tg="spine"><span class="dot">${isY(row[D.spine]) ? '✓' : ''}</span>🧘 Spine routine</button><button class="tg ${isY(row[D.sauna]) ? 'on' : ''}" data-tg="sauna"><span class="dot">${isY(row[D.sauna]) ? '✓' : ''}</span>🔥 Sauna</button></div></div>
+  <div class="card"><h3>Peptides</h3><div class="kv"><div>Retatrutide</div><b>${num(row[D.retaPlan]) ? `${row[D.retaPlan]} mg planned · ${num(row[D.retaU]) ? row[D.retaU] + ' units logged' : 'not logged'}` : 'not today'}</b><div>Tesamorelin</div><b>${tesaActive(s) && num(row[D.tesaPlan]) ? `${row[D.tesaPlan]} mg planned · ${num(row[D.tesaU]) ? row[D.tesaU] + ' units logged' : 'not logged'}` : (num(row[D.tesaPlan]) ? 'not started (Settings)' : 'not planned')}</b></div>
+    <div class="grid2" style="margin-top:10px">${num(row[D.retaPlan]) ? '<button class="btn sm" data-dose="reta" style="width:100%">Retatrutide dose</button>' : ''}${tesaActive(s) && num(row[D.tesaPlan]) ? '<button class="btn sm" data-dose="tesa" style="width:100%">Tesamorelin dose</button>' : ''}</div></div>
+  <div class="card"><div class="field"><label>Notes, symptoms, energy</label><textarea class="inp" id="l-notes" rows="3" data-col="${D.notes}" data-orig="${esc(String(row[D.notes] || '').trim())}">${esc(String(row[D.notes] || '').trim())}</textarea></div></div>
   <button class="btn primary" id="l-save">Save day</button>`;
 }
 function renderTrain() {
@@ -442,7 +451,9 @@ function renderRoutineCard(s, row) {
   let k = 0, p = 0, n = 0;
   const rows = list.map(it => { const f = routineTicked(s, it.id); const on = !!f; const kc = on ? num(f[F.kcal]) || 0 : it.kcal, pr = on ? num(f[F.prot]) || 0 : it.prot; if (on) { k += kc; p += pr; n++; }
     return `<div class="item rt ${on ? 'on' : ''}" data-rt="${esc(it.id)}"><span class="dot">${on ? '✓' : ''}</span><div style="flex:1;min-width:0"><div class="t">${esc(it.name)}</div><div class="s">${esc(it.meal)} · ${fmt(kc)} kcal · ${fmt(pr)} g${on && (kc !== it.kcal || pr !== it.prot) ? ' (adjusted)' : ''}</div></div><button class="iconbtn" data-rtadj="${esc(it.id)}" title="Adjust today's amount" style="width:34px;height:34px;flex:none">±</button></div>`; }).join('');
-  return `<div class="card"><div class="row"><h3>My routine · ${rest ? 'rest day' : 'training day'}</h3><span class="xs muted">${n}/${list.length} · ${fmt(k)} kcal · ${fmt(p)} g</span></div><div class="xs dim" style="margin:-4px 0 10px">Tap what you had. Tap again to undo. ± changes today's amount only.</div>${rows}</div>`;
+  const yd = n === 0 ? state.data.food.filter(f => String(f[F.id]).startsWith(rtFoodId(s - 1, ''))).filter(f => list.some(it => f[F.id] === rtFoodId(s - 1, it.id))) : [];
+  const copy = yd.length ? `<button class="btn ghost" data-rtcopy="1" style="margin-bottom:6px">Same as yesterday (${yd.length} items, ${fmt(yd.reduce((a, f) => a + (num(f[F.kcal]) || 0), 0))} kcal)</button>` : '';
+  return `<div class="card"><div class="row"><h3>My routine · ${rest ? 'rest day' : 'training day'}</h3><span class="xs muted">${n}/${list.length} · ${fmt(k)} kcal · ${fmt(p)} g</span></div><div class="xs dim" style="margin:-4px 0 10px">Tap what you had. Tap again to undo. ± changes today's amount only.</div>${copy}${rows}</div>`;
 }
 function renderProgress() {
   const d = dash(), wk = state.data.weekly.filter(r => r[4] !== '' || r[0] <= weekOf(todaySerial()));
@@ -475,12 +486,15 @@ function drawCharts() {
     options: { plugins: { legend: { display: false } }, scales: { x: { grid, ticks: Object.assign({ maxTicksLimit: 8 }, tick) }, y: { grid, ticks: tick, suggestedMin: 84, suggestedMax: 102 } }, animation: { duration: 600 } } });
   mk('c-rhr', { type: 'line', data: { labels, datasets: [{ label: 'RHR', data: wk.map(r => num(r[7])), borderColor: '#F472B6', pointRadius: 2, borderWidth: 2, tension: .3 }] }, options: { plugins: { legend: { display: false } }, scales: { x: { grid, ticks: Object.assign({ maxTicksLimit: 8 }, tick) }, y: { grid, ticks: tick } } } });
 }
+const tesaIso = v => num(v) == null ? '' : dateFromSerial(v).toISOString().slice(0, 10);
+const isoSerial = s => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || '').trim()); return m ? serialOf(+m[1], +m[2] - 1, +m[3]) : null; };
 function renderSettingsSheet() {
   openSheet(`<h2>Settings</h2>
     <div class="field"><label>Your name</label><input class="inp" id="st-name" value="${esc(settings.name)}"></div>
     <div class="field"><label>Pairing code (web app URL # key)</label><textarea class="inp" id="st-pair" rows="3" autocapitalize="off" autocorrect="off" spellcheck="false">${esc(settings.api ? settings.api + '#' + settings.key : '')}</textarea></div>
     <div class="grid2"><button class="btn" id="st-save">Save</button><button class="btn" id="st-refresh">Refresh data</button></div>
     <button class="btn" id="st-routine" style="margin-top:8px">Edit my routine (usual foods)</button>
+    <div class="card" style="margin-top:12px;padding:12px"><h3>Tesamorelin (conditional)</h3><div class="xs muted" style="margin-bottom:8px">Leave the start empty until the doctor confirms the Nov gates. The plan then runs 1 mg from the start date, 2 mg from Dec 17.</div><div class="inline"><div class="field" style="margin-bottom:8px"><label>Started on</label><input class="inp" id="st-tesa-start" type="date" value="${tesaIso(state.data && state.data.settings && state.data.settings.tesaStart)}"></div><div class="field" style="margin-bottom:8px"><label>Stopped on (optional)</label><input class="inp" id="st-tesa-stop" type="date" value="${tesaIso(state.data && state.data.settings && state.data.settings.tesaStop)}"></div></div><button class="btn sm" id="st-tesa-save">Save tesamorelin dates</button></div>
     <div class="grid2" style="margin-top:8px"><button class="btn ${settings.demo ? 'primary' : ''}" id="st-demo">${settings.demo ? 'Leave demo mode' : 'Demo mode'}</button><button class="btn danger" id="st-signout">${settings.demo ? 'Reset demo data' : 'Disconnect'}</button></div>
     <div class="xs dim" style="margin-top:14px">${settings.demo ? 'Demo mode: sample data on this phone only.' : state.data && state.data.sheetName ? 'Connected to the Google Sheet "' + esc(state.data.sheetName) + '"' + (state.data.tz ? ' (time zone ' + esc(state.data.tz) + ')' : '') + '.' : 'Not connected yet.'} Version ${APP_VERSION}. Pending writes: ${state.queue.length}. App address: ${esc(APP_URL)}. ${state.error ? 'Last error: ' + esc(state.error) : ''}</div>`);
 }
@@ -528,10 +542,10 @@ function benchSheet() {
   openSheet(`<h2>Benchmark test</h2>
     <div class="field"><label>Which test</label><select class="inp" id="b-test">${tests.map(b => `<option value="${b[0]}" ${b === sel ? 'selected' : ''}>${fmtDate(b[0])} · ${esc(b[1])}</option>`).join('')}</select></div>
     <div id="b-fields">${fields.map(([k, l]) => `<div class="field rel"><label>${l}</label><input class="inp num" type="text" inputmode="decimal" data-bf="${k}" value="${esc(rec(k))}"></div>`).join('')}
-    <div class="toggles"><button class="tg ${rec('deadbug') === 'Y' ? 'on' : ''}" data-btg="deadbug"><span class="dot">${rec('deadbug') === 'Y' ? '✓' : ''}</span>Dead-bug pass</button><button class="tg ${rec('thomas') === 'Y' ? 'on' : ''}" data-btg="thomas"><span class="dot">${rec('thomas') === 'Y' ? '✓' : ''}</span>Thomas test flat</button></div></div>
+    <div class="toggles"><button class="tg ${isY(rec('deadbug')) ? 'on' : ''}" data-btg="deadbug"><span class="dot">${isY(rec('deadbug')) ? '✓' : ''}</span>Dead-bug pass</button><button class="tg ${isY(rec('thomas')) ? 'on' : ''}" data-btg="thomas"><span class="dot">${isY(rec('thomas')) ? '✓' : ''}</span>Thomas test flat</button></div></div>
     <div class="xs dim" style="margin:10px 0">Ratios and the gate decision are computed for you. Test the Friday-before yoga-only; postpone to Sunday if resting HR is 10+ bpm over baseline.</div>
     <button class="btn primary" id="b-save">Save test</button>`);
-  $('#b-test').onchange = () => { sel = tests.find(b => b[0] === +$('#b-test').value); fields.forEach(([k]) => { $(`[data-bf="${k}"]`).value = rec(k); }); ['deadbug', 'thomas'].forEach(k => { const b = $(`[data-btg="${k}"]`); b.classList.toggle('on', rec(k) === 'Y'); b.querySelector('.dot').textContent = rec(k) === 'Y' ? '✓' : ''; }); };
+  $('#b-test').onchange = () => { sel = tests.find(b => b[0] === +$('#b-test').value); fields.forEach(([k]) => { $(`[data-bf="${k}"]`).value = rec(k); }); ['deadbug', 'thomas'].forEach(k => { const b = $(`[data-btg="${k}"]`); b.classList.toggle('on', isY(rec(k))); b.querySelector('.dot').textContent = isY(rec(k)) ? '✓' : ''; }); };
   $('#b-fields').addEventListener('click', e => { const b = e.target.closest('[data-btg]'); if (!b) return; b.classList.toggle('on'); b.querySelector('.dot').textContent = b.classList.contains('on') ? '✓' : ''; });
   $('#b-save').onclick = () => { const out = {}; fields.forEach(([k]) => { const v = num($(`[data-bf="${k}"]`).value); if (v != null) out[k] = v; }); ['deadbug', 'thomas'].forEach(k => { out[k] = $(`[data-btg="${k}"]`).classList.contains('on') ? 'Y' : 'N'; }); apply({ kind: 'bench', date: +$('#b-test').value, fields: out }); closeSheet(); };
 }
@@ -557,7 +571,7 @@ function bindSetup() {
     try {
       const j = await new SheetsStore(p.api, p.key).ping();
       if (!j.name) throw new Error('Key rejected. Copy the pairing code from cell B7 of the App Setup sheet again.');
-      if (j.setup === false) throw new Error('The sheet answered, but the tracker sheets are missing: run "setup" in the script editor first (Step 2).');
+      if (j.setup === false) throw new Error(j.missing && j.missing.length && j.missing.length < 6 ? 'The sheet is missing the tab(s): ' + j.missing.join(', ') + '. Rename them back exactly or restore them with File > Version history. Do not run setup.' : 'The sheet answered, but the tracker sheets are missing: run "setup" in the script editor first (Step 2).');
       settings.api = p.api; settings.key = p.key; settings.demo = false; saveSettings(); ['cache', 'mock'].forEach(k => store.del(k)); state.data = null; state.error = null;
       toast('Connected to ' + j.name); await initBackend(); render(); await flush(); refresh(true);
     } catch (e) { state.error = e.message; render(); }
@@ -565,7 +579,7 @@ function bindSetup() {
   $('#s-demo').onclick = async () => { settings.demo = true; saveSettings(); await initBackend(); render(); refresh(true); };
 }
 document.addEventListener('click', async e => {
-  const t = e.target.closest('[data-rtadj],[data-rt],[data-go],[data-nav],[data-open],[data-dose],[data-tg],[data-meal],[data-quick],[data-delfood],[data-cardio],#t-weight-save,#l-save,#w-save,#f-add,#f-manual,#p-refresh,#b-log');
+  const t = e.target.closest('[data-rtcopy],[data-rtadj],[data-rt],[data-go],[data-nav],[data-open],[data-dose],[data-tg],[data-meal],[data-quick],[data-delfood],[data-cardio],#t-weight-save,#l-save,#w-save,#f-add,#f-manual,#p-refresh,#b-log');
   if (!t) return;
   if (t.dataset.go) return go(t.dataset.go);
   if (t.dataset.open === 'settings') return renderSettingsSheet();
@@ -574,6 +588,7 @@ document.addEventListener('click', async e => {
   if (t.dataset.tg && !t.dataset.btg) { t.classList.toggle('on'); t.querySelector('.dot').textContent = t.classList.contains('on') ? '✓' : ''; return; }
   if (t.dataset.meal) { state.meal = t.dataset.meal; return render(); }
   if (t.dataset.quick) { const [item, k, p] = t.dataset.quick.split('|'); $('#f-item').value = item; $('#f-kcal').value = k; $('#f-prot').value = p; Object.assign(state.foodDraft, { item, kcal: k, prot: p }); return; }
+  if (t.dataset.rtcopy != null) { const s = state.foodDate || todaySerial(), list = routineFor(s); state.data.food.filter(f => list.some(it => f[F.id] === rtFoodId(s - 1, it.id))).forEach(f => { const it = list.find(x => f[F.id] === rtFoodId(s - 1, x.id)); apply({ kind: 'food', values: [s, it.meal, it.name, num(f[F.kcal]) ?? it.kcal, num(f[F.prot]) ?? it.prot, 'routine', rtFoodId(s, it.id)] }); }); return; }
   if (t.dataset.rtadj != null || t.dataset.rt != null) {
     const s = state.foodDate || todaySerial(), it = (state.data.routine || []).find(x => x.id === (t.dataset.rtadj != null ? t.dataset.rtadj : t.dataset.rt)); if (!it) return;
     const cur = routineTicked(s, it.id), id = rtFoodId(s, it.id);
@@ -590,14 +605,18 @@ document.addEventListener('click', async e => {
   if (t.id === 't-weight-save') { const v = num($('#t-weight').value); if (v == null) return toast('Enter a weight', true); const i = dailyIdx(todaySerial()); if (i < 0) return toast('Today is outside the plan window', true); apply({ kind: 'cells', sheet: 'Daily Log', cells: [{ addr: colL(D.weight) + sheetRow(i), value: v }] }); return; }
   if (t.id === 'l-save') {
     const s = state.logDate || todaySerial(), i = dailyIdx(s), row = state.data.daily[i], r = sheetRow(i), cells = [];
-    document.querySelectorAll('#app [data-col]').forEach(inp => { const col = +inp.dataset.col; const v = inp.tagName === 'TEXTAREA' ? asText(inp.value.trim()) : num(inp.value); const old = row[col]; if ((v == null || v === '') && !isBlank(old)) cells.push({ addr: colL(col) + r, value: null }); else if (v != null && v !== '' && String(v) !== String(old)) cells.push({ addr: colL(col) + r, value: v }); });
-    [...SUPPS.map(sp => sp.k), 'spine', 'sauna'].forEach(k => { const on = $(`[data-tg="${k}"]`).classList.contains('on'); const col = D[k]; const v = on ? 'Y' : 'N'; if (String(row[col] || '') !== v && !(isBlank(row[col]) && v === 'N')) cells.push({ addr: colL(col) + r, value: v }); });
+    let bad = null;
+    document.querySelectorAll('#app [data-col]').forEach(inp => { const col = +inp.dataset.col, raw = inp.value.trim(); if (raw === String(inp.dataset.orig == null ? '' : inp.dataset.orig).trim()) return; /* untouched: never rewrite a hand-typed cell */ const v = inp.tagName === 'TEXTAREA' ? asText(raw) : num(raw); if (raw === '') { if (!isBlank(row[col])) cells.push({ addr: colL(col) + r, value: null }); return; } if (v == null) { bad = raw; return; } cells.push({ addr: colL(col) + r, value: v }); });
+    if (bad != null) return toast('"' + bad + '" is not a number', true);
+    [...SUPPS.map(sp => sp.k), 'spine', 'sauna'].forEach(k => { const on = $(`[data-tg="${k}"]`).classList.contains('on'); const col = D[k]; if (on !== isY(row[col]) && !(isBlank(row[col]) && !on)) cells.push({ addr: colL(col) + r, value: on ? 'Y' : 'N' }); });
     if (!cells.length) return toast('Nothing changed');
     apply({ kind: 'cells', sheet: 'Daily Log', cells }); return;
   }
   if (t.id === 'w-save') {
     const cells = [];
-    document.querySelectorAll('#app .ex[data-row]').forEach(card => { const i = +card.dataset.row, row = state.data.workout[i], r = sheetRow(i); card.querySelectorAll('[data-wcol]').forEach(inp => { const col = +inp.dataset.wcol, v = num(inp.value), old = row[col]; if (v == null && !isBlank(old)) cells.push({ addr: colL(col) + r, value: null }); else if (v != null && String(v) !== String(old)) cells.push({ addr: colL(col) + r, value: v }); }); });
+    let bad = null;
+    document.querySelectorAll('#app .ex[data-row]').forEach(card => { const i = +card.dataset.row, row = state.data.workout[i], r = sheetRow(i); card.querySelectorAll('[data-wcol]').forEach(inp => { const col = +inp.dataset.wcol, raw = inp.value.trim(), old = row[col]; if (raw === String(isBlank(old) ? '' : old).trim()) return; if (raw === '') { if (!isBlank(old)) cells.push({ addr: colL(col) + r, value: null }); return; } const v = num(raw); if (v == null) { bad = raw; return; } cells.push({ addr: colL(col) + r, value: v }); }); });
+    if (bad != null) return toast('"' + bad + '" is not a number', true);
     if (!cells.length) return toast('Nothing changed');
     apply({ kind: 'cells', sheet: 'Workout Log', cells }); return;
   }
@@ -619,6 +638,7 @@ document.addEventListener('click', e => {
   }
   if (e.target.id === 'st-refresh') { closeSheet(); refresh(); }
   if (e.target.id === 'st-routine') { closeSheet(); setTimeout(routineEditorSheet, 50); }
+  if (e.target.id === 'st-tesa-save') { const st = isoSerial($('#st-tesa-start').value), sp = isoSerial($('#st-tesa-stop').value); const cur = (state.data && state.data.settings) || {}; closeSheet(); if (st !== (num(cur.tesaStart) ?? null)) apply({ kind: 'setting', key: 'tesaStart', value: st }); if (sp !== (num(cur.tesaStop) ?? null)) apply({ kind: 'setting', key: 'tesaStop', value: sp }); toast(st ? 'Tesamorelin starts ' + fmtDate(st) : 'Tesamorelin: not started'); }
   if (e.target.id === 'st-demo') { settings.demo = !settings.demo; saveSettings(); store.del('cache'); location.reload(); }
   if (e.target.id === 'st-signout') { if (settings.demo) { ['mock', 'cache', 'queue'].forEach(k => store.del(k)); location.reload(); } else if (!state.queue.length || confirm(state.queue.length + ' entries have not reached the sheet yet and would be lost. Disconnect anyway?')) disconnect(); }
 });
