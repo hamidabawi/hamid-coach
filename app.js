@@ -3,7 +3,7 @@
    a copy, works offline, and computes the same dashboard locally between syncs. Demo mode needs no sheet at all. */
 (() => {
 'use strict';
-const APP_VERSION = '3.0.0';
+const APP_VERSION = '3.1.0';
 const APP_URL = new URL('./', location.href).href;
 
 /* ---------- Excel serial dates (1899-12-30 epoch), local-calendar based ---------- */
@@ -44,7 +44,7 @@ const store = {
 };
 const settings = Object.assign({ api: '', key: '', demo: false, name: 'Hamid' }, store.get('settings', {}));
 const saveSettings = () => store.set('settings', settings);
-const state = { screen: store.get('screen', 'today'), data: store.get('cache', null), queue: store.get('queue', []), busy: false, apiDown: null, mode: '', logDate: null, trainDate: null, foodDate: null, meal: null, error: null };
+const state = { screen: store.get('screen', 'today'), data: store.get('cache', null), queue: store.get('queue', []), rejected: null, foodDraft: { item: '', kcal: '', prot: '', note: '' }, busy: false, apiDown: null, mode: '', logDate: null, trainDate: null, foodDate: null, meal: null, error: null };
 const deviceId = store.get('device', null) || (() => { const id = (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2)).slice(0, 8); store.set('device', id); return id; })();
 const uuid = () => crypto.randomUUID ? crypto.randomUUID() : (Date.now().toString(36) + Math.random().toString(36).slice(2, 10));
 const todaySerial = () => settings.demo ? serialOf(2026, 10, 11) : serialFromDate(new Date());
@@ -135,6 +135,9 @@ const parsePairing = s => {   // "URL#KEY", "URL KEY", or an #api=...&key=... fr
   return null;
 };
 const looksLikeApi = u => /^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec$/.test(u) || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?\//.test(u);
+const shapeRoutine = rows => (rows || []).map(r => { const dl = String(r[5] == null ? '' : r[5]).trim().toLowerCase(); return { id: String(r[0]), name: String(r[1] || ''), meal: r[2] || 'Other', kcal: num(r[3]) || 0, prot: num(r[4]) || 0, days: dl === 'training' ? 'Training' : dl === 'rest' ? 'Rest' : 'All', active: !(r[6] === false || /^(n|no|false|0|off)$/i.test(String(r[6] == null ? '' : r[6]).trim())), order: num(r[7]) ?? 0, note: String(r[8] || '') }; }).sort((a, b) => a.order - b.order);
+const DEMO_ROUTINE = [["r01", "Kirkland protein shake (ready-to-drink, chocolate, 325 mL)", "Wake-up", 160, 30, "All", "Y", 1, ""], ["r02", "Pre-workout (1 scoop)", "Wake-up", 10, 0, "Training", "Y", 2, ""], ["r03", "Espresso shot (only when drowsy)", "Wake-up", 3, 0, "All", "Y", 3, ""], ["r04", "Post-gym shake: 1.5 scoops LeanFit + 250 mL Natrel Plus + 1/4 cup oats + banana", "Post-gym", 558, 58, "Training", "Y", 4, ""], ["r05", "Rest-day shake: 1 scoop LeanFit + 250 mL Natrel Plus + banana (no oats)", "Post-gym", 405, 43, "Rest", "Y", 5, ""], ["r06", "Egg roll: 2 eggs + 2/3 cup egg whites + large tortilla", "Lunch", 500, 34, "All", "Y", 6, ""], ["r07", "Grenade protein bar, chocolate (the 'Granite' bar)", "Snack", 240, 21, "All", "Y", 7, ""], ["r08", "Fed meal", "Dinner", 750, 48, "All", "Y", 8, ""], ["r09", "Karak chai, Regular (Chaiiwala, Robson)", "Snack", 144, 5, "All", "Y", 9, ""], ["r10", "Greek yogurt 0%, 175 g", "Snack", 100, 18, "All", "Y", 10, ""], ["r11", "Pre-sleep protein: 2nd Kirkland carton or 1 cup 1% cottage cheese", "Pre-sleep", 160, 30, "All", "Y", 11, ""]];
+const rtFoodId = (s, id) => `rt|${s}|${id}`;
 class SheetsStore {
   constructor(api, key) { this.api = api.replace(/\/+$/, ''); this.key = key; }
   async call(params, body) {
@@ -157,7 +160,7 @@ class SheetsStore {
     const meta = j.meta || {};
     return { daily: (j.daily || []).map(r => pad(r, 38)), workout: (j.workout || []).map(r => pad(r, 17)), food: (j.food || []).map(r => pad(r, 7)), bench: (j.bench || []).map(r => pad(r, 21)), weekly: (j.weekly || []).map(r => pad(r, 28)),
       dashboard: parseDashboard(j.dashboard || []), labs: meta.labs, forecast: meta.forecast, weeklyNotes: meta.weeklyNotes, startWeight: meta.startWeight, heightCm: meta.heightCm,
-      sheetToday: j.today, sheetName: j.name, tz: j.tz, ts: Date.now(), source: 'sheets', dashboardSource: 'sheets' };
+      routine: shapeRoutine(j.routine), routineSupported: Array.isArray(j.routine), sheetToday: j.today, sheetName: j.name, tz: j.tz, ts: Date.now(), source: 'sheets', dashboardSource: 'sheets' };
   }
 }
 function parseDashboard(rows) {
@@ -214,12 +217,13 @@ class Mock {
       });
     }
     const bench = [[serialOf(2026, 8, 29), 'Baseline', 96, 41, 44, 118, 74, 12, 11, 'Y', 'N', 2, 101, 'BW x 15', 24, '', '', '', '', '', 'record'], [serialOf(2026, 10, 21), '#2 (gate for Month 3 heavy 5s)', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 120], [serialOf(2027, 0, 23), '#3 (gate for 175 kg trap bar)', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 150], [serialOf(2027, 2, 20), '#4 (retest week)', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 150]];
-    const d = { daily, workout, food, bench, weekly: [], dashboard: null, ts: Date.now(), source: 'demo', dashboardSource: 'phone' }; this.recompute(d); return d;
+    const d = { daily, workout, food, bench, weekly: [], dashboard: null, routineRows: DEMO_ROUTINE.map(r => r.slice()), ts: Date.now(), source: 'demo', dashboardSource: 'phone' }; this.recompute(d); return d;
   }
-  recompute(d) { const r = computeDashboard(d, serialOf(2026, 10, 11)); d.dashboard = r.dashboard; d.weekly = r.weekly; d.ts = Date.now(); store.set('mock', d); return d; }
+  recompute(d) { const r = computeDashboard(d, serialOf(2026, 10, 11)); d.dashboard = r.dashboard; d.weekly = r.weekly; d.routineRows = d.routineRows || DEMO_ROUTINE.map(x => x.slice()); d.routine = shapeRoutine(d.routineRows); d.routineSupported = true; d.ts = Date.now(); store.set('mock', d); return d; }
+  async writeRoutine(op) { const rows = this.data.routineRows; if (op.action === 'delete') { const i = rows.findIndex(r => String(r[0]) === String(op.id)); if (i >= 0) rows.splice(i, 1); } else { const it = op.item, i = rows.findIndex(r => String(r[0]) === String(it.id)); const row = i >= 0 ? rows[i].slice() : [it.id, 'Item', 'Other', 0, 0, 'All', 'Y', rows.length + 1, '']; if ('name' in it) row[1] = it.name; if ('meal' in it) row[2] = it.meal; if ('kcal' in it) row[3] = it.kcal; if ('prot' in it) row[4] = it.prot; if ('days' in it) row[5] = it.days; if ('active' in it) row[6] = it.active === false ? 'N' : 'Y'; if ('order' in it) row[7] = it.order; if ('note' in it) row[8] = it.note || ''; if (i >= 0) rows[i] = row; else rows.push(row); } this.recompute(this.data); }
   async readAll() { this.recompute(this.data); return JSON.parse(JSON.stringify(this.data)); }
   async writeCells(sheet, cells) { const tbl = sheet === 'Daily Log' ? this.data.daily : this.data.workout; cells.forEach(c => { const m = c.addr.match(/^([A-Z]+)(\d+)$/); tbl[+m[2] - 2][colIdx(m[1])] = c.value == null ? '' : c.value; }); this.recompute(this.data); }
-  async addFoodRow(v) { this.data.food.push(v.slice()); this.recompute(this.data); }
+  async addFoodRow(v) { const i = this.data.food.findIndex(r => r[6] && r[6] === v[6]); if (i >= 0) this.data.food[i] = v.slice(); else this.data.food.push(v.slice()); this.recompute(this.data); }
   async deleteFoodRow(i, expect, id) { const j = this.data.food.findIndex(r => r[6] === id); if (j >= 0) this.data.food.splice(j, 1); this.recompute(this.data); }
   async writeBench(date, fields) { const b = this.data.bench.find(x => x[0] === date); if (!b) return; Object.entries(fields).forEach(([k, v]) => { const ci = BENCH_FIELDS.indexOf(k); if (ci >= 0) b[2 + ci] = v == null ? '' : v; }); this.recompute(this.data); }
 }
@@ -248,6 +252,8 @@ const dash = () => (state.data && state.data.dashboard) || { map: {}, supp: {}, 
 const dv = k => { const v = dash().map[k]; return v == null ? '' : v; };
 const statusCls = t => /^ACTION/.test(t) ? 'action' : /^WATCH/.test(t) ? 'watch' : /^OK/.test(t) ? 'ok' : '';
 const statusText = t => String(t).replace(/^(OK|WATCH|ACTION):\s*/, '');
+const routineFor = s => { const row = dailyRow(s) || [], rest = row[D.session] === 'Rest'; return (state.data.routine || []).filter(it => it.active && (it.days === 'All' || (it.days === 'Rest') === rest)); };
+const routineTicked = (s, id) => state.data.food.find(r => r[F.id] === rtFoodId(s, id)) || null;
 const foodFor = s => state.data.food.map((r, i) => ({ r, i })).filter(x => x.r[F.date] === s && !(+x.r[F.kcal] === 0 && /example row/i.test(x.r[F.item])));
 const workoutFor = s => state.data.workout.map((r, i) => ({ r, i })).filter(x => x.r[W.date] === s);
 function recomputeLocal() { if (!state.data) return; const r = computeDashboard(state.data, todaySerial()); state.data.dashboard = r.dashboard; if (state.data.source !== 'sheets' || state.apiDown) state.data.weekly = r.weekly; state.data.dashboardSource = 'phone'; }
@@ -269,26 +275,29 @@ async function apply(op) {   // {kind:'cells', sheet, cells} | {kind:'food', val
 function applyLocal(op) {
   if (!state.data) return;
   if (op.kind === 'cells') { const tbl = op.sheet === 'Daily Log' ? state.data.daily : state.data.workout; op.cells.forEach(c => { const m = c.addr.match(/^([A-Z]+)(\d+)$/); const row = tbl[+m[2] - 2]; if (row) row[colIdx(m[1])] = c.value == null ? '' : c.value; }); }
-  if (op.kind === 'food' && !state.data.food.some(r => r[6] && r[6] === op.values[6])) state.data.food.push(op.values.slice());
+  if (op.kind === 'food') { const i = state.data.food.findIndex(r => r[6] && r[6] === op.values[6]); if (i >= 0) state.data.food[i] = op.values.slice(); else state.data.food.push(op.values.slice()); }
   if (op.kind === 'delfood') { const i = state.data.food.findIndex(r => (op.id && r[6] === op.id) || (!op.id && r[F.date] === op.expect[F.date] && String(r[F.item]) === String(op.expect[F.item]))); if (i >= 0) state.data.food.splice(i, 1); }
   if (op.kind === 'bench') { const b = state.data.bench.find(x => x[0] === op.date); if (b) Object.entries(op.fields).forEach(([k, v]) => { const ci = BENCH_FIELDS.indexOf(k); if (ci >= 0) b[2 + ci] = v == null ? '' : v; }); }
+  if (op.kind === 'routine') { const list = state.data.routine = state.data.routine || []; if (op.action === 'delete') { const i = list.findIndex(x => x.id === String(op.id)); if (i >= 0) list.splice(i, 1); } else if (op.item) { const i = list.findIndex(x => x.id === String(op.item.id)); const it = Object.assign(i >= 0 ? list[i] : { name: 'Item', meal: 'Other', kcal: 0, prot: 0, active: true, days: 'All', order: list.length + 1, note: '' }, op.item, { id: String(op.item.id) }); if (i >= 0) list[i] = it; else list.push(it); list.sort((a, b) => a.order - b.order); } }
 }
 let flushing = false;
 async function flush() {
   if (flushing || !backend || !state.queue.length) return;
   if (!navigator.onLine && !settings.demo) { syncUI(); return; }
-  flushing = true; state.busy = true; syncUI(); let failed = false;
+  flushing = true; state.busy = true; syncUI(); let failed = false; const rejected = [];
   try {
     if (backend.writeOps) {
       while (state.queue.length) {
         const ops = state.queue.slice();
         const res = await backend.writeOps(ops);
         state.queue = state.queue.slice(ops.length); store.set('queue', state.queue);
-        (res.rejected || []).forEach(rj => { const op = ops[rj.index]; toast('Not saved (' + (op ? op.kind : '?') + '): ' + rj.error, true); });
+        (res.rejected || []).forEach(rj => { const op = ops[rj.index]; rejected.push('Not saved (' + (op ? op.kind : '?') + '): ' + rj.error); });
         state.data = res.data; state.queue.forEach(applyLocal); if (state.queue.length || sheetDateOff(state.data)) recomputeLocal();
+        if (rejected.some(m => /Routine sheet missing/.test(m))) state.data.routineSupported = false;
         store.set('cache', state.data); state.error = null; state.apiDown = null;
       }
-      toast('Saved to Google Sheets');
+      state.rejected = rejected.length ? rejected : null;
+      if (rejected.length) toast(rejected[0] + (rejected.length > 1 ? ' (+' + (rejected.length - 1) + ' more)' : ''), true); else toast('Saved to Google Sheets');
     } else {
       while (state.queue.length) {
         const op = state.queue[0];
@@ -296,6 +305,7 @@ async function flush() {
         else if (op.kind === 'food') await backend.addFoodRow(op.values);
         else if (op.kind === 'delfood') await backend.deleteFoodRow(op.index, op.expect, op.id);
         else if (op.kind === 'bench') await backend.writeBench(op.date, op.fields);
+        else if (op.kind === 'routine') await backend.writeRoutine(op);
         state.queue.shift(); store.set('queue', state.queue);
       }
       await refresh(true); toast('Saved');
@@ -323,7 +333,7 @@ function ring(pct, label, val, color) {
 }
 const greet = () => { const h = new Date().getHours(); return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'; };
 const dateNav = (which, s) => `<div class="datenav"><button class="iconbtn" data-nav="${which}:-1">‹</button><div class="d">${fmtDate(s, { weekday: 'long', day: 'numeric', month: 'long' })}${s === todaySerial() ? ' <span class="chip teal" style="margin-left:6px">Today</span>' : ''}</div><button class="iconbtn" data-nav="${which}:1" ${s >= todaySerial() ? 'disabled style="opacity:.3"' : ''}>›</button></div>`;
-const banner = () => state.apiDown && !settings.demo ? `<div class="status watch" style="margin-bottom:12px">Google Sheets unreachable: ${esc(state.apiDown)}<br><span class="xs">Showing the last synced data plus your entries. Everything is kept on the phone and uploads when sync works again.${/Key rejected/.test(state.apiDown) ? ' Open Settings and paste the pairing code again.' : ''}</span></div>` : '';
+const banner = () => (state.rejected ? `<div class="status action" style="margin-bottom:12px">The sheet refused ${state.rejected.length} entr${state.rejected.length > 1 ? 'ies' : 'y'}: ${esc(state.rejected[0])}<br><span class="xs">They were not saved. This notice clears at the next successful save.</span></div>` : '') + (state.apiDown && !settings.demo ? `<div class="status watch" style="margin-bottom:12px">Google Sheets unreachable: ${esc(state.apiDown)}<br><span class="xs">Showing the last synced data plus your entries. Everything is kept on the phone and uploads when sync works again.${/Key rejected/.test(state.apiDown) ? ' Open Settings and paste the pairing code again.' : ''}</span></div>` : '');
 
 /* ---------- screens ---------- */
 function renderSetup() {
@@ -414,14 +424,25 @@ function renderFood() {
     <div class="bar ${shownK > kT + 200 ? 'warn' : ''}" style="margin-top:10px"><i style="width:${Math.min(100, shownK / kT * 100)}%"></i></div>
     <div class="bar" style="margin-top:6px"><i style="width:${Math.min(100, shownP / pT * 100)}%;background:var(--violet)"></i></div>
     <div class="xs dim" style="margin-top:8px">${shownK < floor && s === todaySerial() ? `Floor is ${fmt(floor)} kcal: below it a higher fraction of the loss is lean tissue.` : 'Protein first at every meal. Shakes count, collagen does not.'} ${manual != null ? '<br>A manual calorie total is set for this day (overrides the item sum).' : ''}</div></div>
-  <div class="card"><h3>Add</h3>
+  ${renderRoutineCard(s, row)}
+  <div class="card"><h3>Anything else</h3>
     <div class="seg" style="margin-bottom:10px">${['Wake-up', 'Post-gym', 'Lunch', 'Snack', 'Dinner', 'Pre-sleep'].map(m => `<button class="${m === meal ? 'on' : ''}" data-meal="${m}">${m.replace('Wake-up', 'AM').replace('Post-gym', 'Gym').replace('Pre-sleep', 'Bed')}</button>`).join('')}</div>
     ${recent.length ? `<div class="quick">${recent.map(r => `<button data-quick="${esc(r[F.item])}|${r[F.kcal]}|${r[F.prot]}">${esc(r[F.item])}<small>${fmt(r[F.kcal])} kcal · ${fmt(r[F.prot])} g</small></button>`).join('')}</div>` : ''}
-    <div class="field"><label>Item</label><input class="inp" id="f-item" placeholder="e.g. Whey + protein milk" autocapitalize="sentences"></div>
-    <div class="inline"><div class="field rel"><label>Calories</label><input class="inp num" id="f-kcal" type="text" inputmode="numeric" placeholder="0"><span class="unit">kcal</span></div><div class="field rel"><label>Protein</label><input class="inp num" id="f-prot" type="text" inputmode="numeric" placeholder="0"><span class="unit">g</span></div></div>
+    <div class="field"><label>Item</label><input class="inp" id="f-item" placeholder="e.g. Whey + protein milk" autocapitalize="sentences" value="${esc(state.foodDraft.item)}"></div>
+    <div class="inline"><div class="field rel"><label>Calories</label><input class="inp num" id="f-kcal" type="text" inputmode="numeric" placeholder="0" value="${esc(state.foodDraft.kcal)}"><span class="unit">kcal</span></div><div class="field rel"><label>Protein</label><input class="inp num" id="f-prot" type="text" inputmode="numeric" placeholder="0" value="${esc(state.foodDraft.prot)}"><span class="unit">g</span></div></div>
+    <div class="field"><label>Note (optional)</label><input class="inp" id="f-note" placeholder="e.g. shared a dessert, half portion" autocapitalize="sentences" value="${esc(state.foodDraft.note)}"></div>
     <button class="btn primary" id="f-add">Add to ${esc(meal)}</button>
     <div class="row" style="margin-top:10px"><span class="xs muted">Or set the day's total by hand</span><button class="btn sm ghost" id="f-manual">${manual != null ? 'Edit total' : 'Enter total'}</button></div></div>
-  <div class="card"><h3>${fmtDate(s)} · ${items.length} items</h3>${items.length ? items.map(x => `<div class="item"><div><div class="t">${esc(x.r[F.item])}</div><div class="s">${esc(x.r[F.meal])} · ${fmt(x.r[F.kcal])} kcal · ${fmt(x.r[F.prot])} g</div></div><button class="iconbtn" data-delfood="${x.i}" style="width:34px;height:34px">✕</button></div>`).join('') : '<div class="muted small">Nothing logged yet.</div>'}</div>`;
+  <div class="card"><h3>${fmtDate(s)} · ${items.length} items</h3>${items.length ? items.map(x => `<div class="item"><div><div class="t">${esc(x.r[F.item])}</div><div class="s">${esc(x.r[F.meal])} · ${fmt(x.r[F.kcal])} kcal · ${fmt(x.r[F.prot])} g${/^rt\|/.test(String(x.r[F.id])) ? ' · routine' : ''}${x.r[F.note] && x.r[F.note] !== 'routine' ? ' · ' + esc(x.r[F.note]) : ''}</div></div><button class="iconbtn" data-delfood="${x.i}" style="width:34px;height:34px">✕</button></div>`).join('') : '<div class="muted small">Nothing logged yet.</div>'}</div>`;
+}
+function renderRoutineCard(s, row) {
+  if (state.data.routineSupported === false) return `<div class="card"><h3>My routine</h3><div class="status watch">The Google Sheet needs the newer script: in the script editor paste the new HamidCoach.gs, choose "upgrade" and Run, then Deploy, Manage deployments, pencil, Version: New version, Deploy.</div></div>`;
+  const list = routineFor(s), rest = row[D.session] === 'Rest';
+  if (!list.length) return `<div class="card"><h3>My routine</h3><div class="muted small">No routine items yet. Add your usual foods under Settings, "Edit my routine".</div></div>`;
+  let k = 0, p = 0, n = 0;
+  const rows = list.map(it => { const f = routineTicked(s, it.id); const on = !!f; const kc = on ? num(f[F.kcal]) || 0 : it.kcal, pr = on ? num(f[F.prot]) || 0 : it.prot; if (on) { k += kc; p += pr; n++; }
+    return `<div class="item rt ${on ? 'on' : ''}" data-rt="${esc(it.id)}"><span class="dot">${on ? '✓' : ''}</span><div style="flex:1;min-width:0"><div class="t">${esc(it.name)}</div><div class="s">${esc(it.meal)} · ${fmt(kc)} kcal · ${fmt(pr)} g${on && (kc !== it.kcal || pr !== it.prot) ? ' (adjusted)' : ''}</div></div><button class="iconbtn" data-rtadj="${esc(it.id)}" title="Adjust today's amount" style="width:34px;height:34px;flex:none">±</button></div>`; }).join('');
+  return `<div class="card"><div class="row"><h3>My routine · ${rest ? 'rest day' : 'training day'}</h3><span class="xs muted">${n}/${list.length} · ${fmt(k)} kcal · ${fmt(p)} g</span></div><div class="xs dim" style="margin:-4px 0 10px">Tap what you had. Tap again to undo. ± changes today's amount only.</div>${rows}</div>`;
 }
 function renderProgress() {
   const d = dash(), wk = state.data.weekly.filter(r => r[4] !== '' || r[0] <= weekOf(todaySerial()));
@@ -459,6 +480,7 @@ function renderSettingsSheet() {
     <div class="field"><label>Your name</label><input class="inp" id="st-name" value="${esc(settings.name)}"></div>
     <div class="field"><label>Pairing code (web app URL # key)</label><textarea class="inp" id="st-pair" rows="3" autocapitalize="off" autocorrect="off" spellcheck="false">${esc(settings.api ? settings.api + '#' + settings.key : '')}</textarea></div>
     <div class="grid2"><button class="btn" id="st-save">Save</button><button class="btn" id="st-refresh">Refresh data</button></div>
+    <button class="btn" id="st-routine" style="margin-top:8px">Edit my routine (usual foods)</button>
     <div class="grid2" style="margin-top:8px"><button class="btn ${settings.demo ? 'primary' : ''}" id="st-demo">${settings.demo ? 'Leave demo mode' : 'Demo mode'}</button><button class="btn danger" id="st-signout">${settings.demo ? 'Reset demo data' : 'Disconnect'}</button></div>
     <div class="xs dim" style="margin-top:14px">${settings.demo ? 'Demo mode: sample data on this phone only.' : state.data && state.data.sheetName ? 'Connected to the Google Sheet "' + esc(state.data.sheetName) + '"' + (state.data.tz ? ' (time zone ' + esc(state.data.tz) + ')' : '') + '.' : 'Not connected yet.'} Version ${APP_VERSION}. Pending writes: ${state.queue.length}. App address: ${esc(APP_URL)}. ${state.error ? 'Last error: ' + esc(state.error) : ''}</div>`);
 }
@@ -475,6 +497,29 @@ function doseSheet(kind, s) {
   const uCol = kind === 'reta' ? D.retaU : D.tesaU, sCol = kind === 'reta' ? D.retaSite : D.tesaSite, r = sheetRow(dailyIdx(s));
   $('#d-save').onclick = () => { const u = num($('#d-units').value); const on = $('#d-sites .on'); apply({ kind: 'cells', sheet: 'Daily Log', cells: [{ addr: colL(uCol) + r, value: u }, { addr: colL(sCol) + r, value: on ? on.dataset.site : null }] }); closeSheet(); };
   $('#d-clear').onclick = () => { apply({ kind: 'cells', sheet: 'Daily Log', cells: [{ addr: colL(uCol) + r, value: null }, { addr: colL(sCol) + r, value: null }] }); closeSheet(); };
+}
+function routineEditorSheet() {
+  if (!state.data) return;
+  const MEAL_OPTS = ['Wake-up', 'Pre-lift', 'Post-gym', 'Lunch', 'Snack', 'Dinner', 'Pre-sleep', 'Cheat meal', 'Other'];
+  const list = (state.data.routine || []).map(x => Object.assign({}, x)); const removed = new Set();
+  const rowHtml = (it, i) => `<div class="card rtedit" data-i="${i}" style="padding:12px">
+      <div class="field" style="margin-bottom:8px"><label>Item</label><input class="inp" data-rf="name" value="${esc(it.name)}"></div>
+      <div class="inline"><div class="field rel" style="margin-bottom:8px"><label>Calories</label><input class="inp num" data-rf="kcal" type="text" inputmode="numeric" value="${it.kcal}"><span class="unit">kcal</span></div><div class="field rel" style="margin-bottom:8px"><label>Protein</label><input class="inp num" data-rf="prot" type="text" inputmode="numeric" value="${it.prot}"><span class="unit">g</span></div></div>
+      <div class="inline"><div class="field" style="margin-bottom:8px"><label>Meal</label><select class="inp" data-rf="meal">${(MEAL_OPTS.includes(it.meal) ? MEAL_OPTS : [it.meal, ...MEAL_OPTS]).map(m => `<option ${m === it.meal ? 'selected' : ''}>${esc(m)}</option>`).join('')}</select></div><div class="field" style="margin-bottom:8px"><label>Days</label><select class="inp" data-rf="days">${['All', 'Training', 'Rest'].map(m => `<option ${m === it.days ? 'selected' : ''}>${m}</option>`).join('')}</select></div></div>
+      <div class="row"><label class="small"><input type="checkbox" data-rf="active" ${it.active ? 'checked' : ''}> Active</label><button class="btn sm ghost" data-rtdel="${i}">Remove</button></div></div>`;
+  openSheet(`<h2>My routine</h2><div class="xs muted" style="margin-bottom:10px">Your usual foods with their calories and protein. Days: All, Training (gym days) or Rest. The same list lives on the Routine sheet.</div>
+    <div id="rt-list">${list.map(rowHtml).join('')}</div>
+    <button class="btn ghost" id="rt-add">+ Add an item</button>
+    <button class="btn primary" id="rt-save" style="margin-top:8px">Save routine</button>`);
+  const read = () => { document.querySelectorAll('#rt-list .rtedit').forEach(card => { const i = +card.dataset.i, it = list[i]; if (!it) return; it.name = card.querySelector('[data-rf=name]').value.trim() || it.name; it.kcal = num(card.querySelector('[data-rf=kcal]').value) ?? 0; it.prot = num(card.querySelector('[data-rf=prot]').value) ?? 0; it.meal = card.querySelector('[data-rf=meal]').value; it.days = card.querySelector('[data-rf=days]').value; it.active = card.querySelector('[data-rf=active]').checked; }); };
+  const redraw = () => { $('#rt-list').innerHTML = list.map((it, i) => removed.has(i) ? '' : rowHtml(it, i)).join(''); };
+  $('#rt-add').onclick = () => { read(); list.push({ id: 'u' + Date.now().toString(36).slice(-6), name: '', meal: 'Snack', kcal: 0, prot: 0, days: 'All', active: true, order: list.length + 1, note: '', isNew: true }); redraw(); const cards = document.querySelectorAll('#rt-list .rtedit'); const last = cards[cards.length - 1]; if (last) { last.scrollIntoView({ behavior: 'smooth' }); last.querySelector('[data-rf=name]').focus(); } };
+  $('#rt-list').addEventListener('click', e => { const b = e.target.closest('[data-rtdel]'); if (!b) return; read(); removed.add(+b.dataset.rtdel); redraw(); });
+  $('#rt-save').onclick = () => {
+    read(); const before = state.data.routine || []; const ops = [];
+    list.forEach((it, i) => { if (removed.has(i)) { if (!it.isNew) ops.push({ kind: 'routine', action: 'delete', id: it.id }); return; } if (!it.name) return; const old = before.find(x => x.id === it.id); const clean = { id: it.id, name: asText(it.name), meal: it.meal, kcal: it.kcal, prot: it.prot, days: it.days, active: it.active, order: i + 1 }; if (!old) { ops.push({ kind: 'routine', action: 'set', item: clean }); return; } const item = { id: it.id }; ['name', 'meal', 'kcal', 'prot', 'days', 'active', 'order'].forEach(k => { if (String(old[k]) !== String(clean[k])) item[k] = clean[k]; }); if (Object.keys(item).length > 1) ops.push({ kind: 'routine', action: 'set', item }); });
+    closeSheet(); if (!ops.length) return toast('Nothing changed'); ops.forEach(op => apply(op)); go('food');
+  };
 }
 function benchSheet() {
   const tests = state.data.bench; const t = todaySerial(); let sel = tests.filter(b => b[0] <= t + 7).pop() || tests[0];
@@ -520,7 +565,7 @@ function bindSetup() {
   $('#s-demo').onclick = async () => { settings.demo = true; saveSettings(); await initBackend(); render(); refresh(true); };
 }
 document.addEventListener('click', async e => {
-  const t = e.target.closest('[data-go],[data-nav],[data-open],[data-dose],[data-tg],[data-meal],[data-quick],[data-delfood],[data-cardio],#t-weight-save,#l-save,#w-save,#f-add,#f-manual,#p-refresh,#b-log');
+  const t = e.target.closest('[data-rtadj],[data-rt],[data-go],[data-nav],[data-open],[data-dose],[data-tg],[data-meal],[data-quick],[data-delfood],[data-cardio],#t-weight-save,#l-save,#w-save,#f-add,#f-manual,#p-refresh,#b-log');
   if (!t) return;
   if (t.dataset.go) return go(t.dataset.go);
   if (t.dataset.open === 'settings') return renderSettingsSheet();
@@ -528,7 +573,17 @@ document.addEventListener('click', async e => {
   if (t.dataset.dose) return doseSheet(t.dataset.dose, (state.screen === 'log' ? state.logDate : null) || todaySerial());
   if (t.dataset.tg && !t.dataset.btg) { t.classList.toggle('on'); t.querySelector('.dot').textContent = t.classList.contains('on') ? '✓' : ''; return; }
   if (t.dataset.meal) { state.meal = t.dataset.meal; return render(); }
-  if (t.dataset.quick) { const [item, k, p] = t.dataset.quick.split('|'); $('#f-item').value = item; $('#f-kcal').value = k; $('#f-prot').value = p; return; }
+  if (t.dataset.quick) { const [item, k, p] = t.dataset.quick.split('|'); $('#f-item').value = item; $('#f-kcal').value = k; $('#f-prot').value = p; Object.assign(state.foodDraft, { item, kcal: k, prot: p }); return; }
+  if (t.dataset.rtadj != null || t.dataset.rt != null) {
+    const s = state.foodDate || todaySerial(), it = (state.data.routine || []).find(x => x.id === (t.dataset.rtadj != null ? t.dataset.rtadj : t.dataset.rt)); if (!it) return;
+    const cur = routineTicked(s, it.id), id = rtFoodId(s, it.id);
+    if (t.dataset.rtadj != null) {
+      const k = prompt(`${it.name}\nCalories today:`, cur ? cur[F.kcal] : it.kcal); if (k === null) return; const pr = prompt('Protein today (g):', cur ? cur[F.prot] : it.prot); if (pr === null) return;
+      apply({ kind: 'food', values: [s, it.meal, it.name, num(k) ?? it.kcal, num(pr) ?? it.prot, 'routine', id] }); return;   // same id: the sheet updates the row in place
+    }
+    if (cur) apply({ kind: 'delfood', index: state.data.food.indexOf(cur), expect: cur.slice(0, 5), id }); else apply({ kind: 'food', values: [s, it.meal, it.name, it.kcal, it.prot, 'routine', id] });
+    return;
+  }
   if (t.dataset.delfood != null) { const i = +t.dataset.delfood, row = state.data.food[i]; if (confirm('Remove this item?')) apply({ kind: 'delfood', index: i, expect: row.slice(0, 5), id: row[6] || null }); return; }
   if (t.dataset.cardio != null) { const i = +t.dataset.cardio; const r = state.data.workout[i]; apply({ kind: 'cells', sheet: 'Workout Log', cells: [{ addr: colL(W.setsDone) + sheetRow(i), value: r[W.setsDone] ? null : 1 }] }); return; }
   if (t.id === 'b-log') return benchSheet();
@@ -547,9 +602,9 @@ document.addEventListener('click', async e => {
     apply({ kind: 'cells', sheet: 'Workout Log', cells }); return;
   }
   if (t.id === 'f-add') {
-    const item = asText($('#f-item').value.trim()), k = num($('#f-kcal').value), p = num($('#f-prot').value) || 0; if (!item || k == null) return toast('Item and calories are needed', true);
+    const item = asText($('#f-item').value.trim()), k = num($('#f-kcal').value), p = num($('#f-prot').value) || 0, note = asText(($('#f-note') ? $('#f-note').value : '').trim()); if (!item || k == null) return toast('Item and calories are needed', true);
     const s = state.foodDate || todaySerial(); const hour = new Date().getHours(); const meal = state.meal || (hour < 10 ? 'Wake-up' : hour < 13 ? 'Lunch' : hour < 17 ? 'Snack' : hour < 21 ? 'Dinner' : 'Pre-sleep');
-    apply({ kind: 'food', values: [s, meal, item, k, p, '', uuid()] }); return;
+    state.foodDraft = { item: '', kcal: '', prot: '', note: '' }; apply({ kind: 'food', values: [s, meal, item, k, p, note, uuid()] }); return;
   }
   if (t.id === 'f-manual') { const s = state.foodDate || todaySerial(), i = dailyIdx(s), row = state.data.daily[i]; const v = prompt('Total calories for the day (leave empty to use the item sum):', row[D.kcalM] || ''); if (v === null) return; const p = prompt('Total protein for the day (g), optional:', row[D.protM] || ''); const cells = [{ addr: colL(D.kcalM) + sheetRow(i), value: num(v) }]; if (p !== null) cells.push({ addr: colL(D.protM) + sheetRow(i), value: num(p) }); apply({ kind: 'cells', sheet: 'Daily Log', cells }); return; }
   if (t.id === 'p-refresh') return refresh();
@@ -563,9 +618,11 @@ document.addEventListener('click', e => {
     saveSettings(); closeSheet(); if (changed) { ['cache', 'mock'].forEach(k => store.del(k)); location.reload(); } else render();
   }
   if (e.target.id === 'st-refresh') { closeSheet(); refresh(); }
+  if (e.target.id === 'st-routine') { closeSheet(); setTimeout(routineEditorSheet, 50); }
   if (e.target.id === 'st-demo') { settings.demo = !settings.demo; saveSettings(); store.del('cache'); location.reload(); }
   if (e.target.id === 'st-signout') { if (settings.demo) { ['mock', 'cache', 'queue'].forEach(k => store.del(k)); location.reload(); } else if (!state.queue.length || confirm(state.queue.length + ' entries have not reached the sheet yet and would be lost. Disconnect anyway?')) disconnect(); }
 });
+document.addEventListener('input', e => { const m = { 'f-item': 'item', 'f-kcal': 'kcal', 'f-prot': 'prot', 'f-note': 'note' }[e.target.id]; if (m) state.foodDraft[m] = e.target.value; });
 window.addEventListener('online', () => { syncUI(); flush(); });
 window.addEventListener('offline', syncUI);
 document.addEventListener('visibilitychange', () => { if (document.hidden || !backend) return; if (state.queue.length) flush(); else if (state.data && Date.now() - state.data.ts > 5 * 60000) refresh(true); });

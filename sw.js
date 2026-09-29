@@ -3,8 +3,8 @@
    - Versioned assets (app.js?v=N, vendor libs, icons): cache first.
    - The Google Sheets API / anything cross-origin: never touched.
    To ship an update: change the ?v= number in index.html AND in SHELL below, and bump VERSION. */
-const VERSION = 'coach-v6';
-const SHELL = ['./', './app.js?v=6', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png', './vendor/chart-4.5.1.umd.min.js'];
+const VERSION = 'coach-v7';
+const SHELL = ['./', './app.js?v=7', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png', './vendor/chart-4.5.1.umd.min.js'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
 });
